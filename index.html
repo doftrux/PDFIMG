@@ -1,0 +1,2152 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PDF/IMG Studio Ultimate</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- 🚀 핵심 해결책: Import Map으로 모듈 의존성 통일 (React 중복 방지) -->
+  <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "react/jsx-runtime": "https://esm.sh/react@18.2.0/jsx-runtime",
+        "lucide-react": "https://esm.sh/lucide-react@0.292.0?deps=react@18.2.0"
+      }
+    }
+  </script>
+
+  <!-- Babel (JSX 컴파일러) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- 🚀 핵심 해결책: 엔진 스크립트를 Head에서 미리 로드하여 타이밍 에러 차단 -->
+  <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+  <script src="https://unpkg.com/@pdf-lib/fontkit@0.0.4/dist/fontkit.umd.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+
+  <style>
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    body { -webkit-font-smoothing: antialiased; background-color: #f1f5f9; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" data-type="module">
+    // importmap에 정의된 짧은 이름표로 불러옵니다.
+    import React, { useState, useEffect, useRef } from 'react';
+    import { createRoot } from 'react-dom/client';
+    import { 
+      UploadCloud, FileText, RotateCw, X, Download, Lock, Info,
+      GripHorizontal, AlertTriangle, PlusSquare, Trash2, Settings,
+      FilePlus, Copy, CheckSquare, Square, Type, FileDown,
+      Maximize2, ZoomIn, ZoomOut, Archive, ArrowDownAZ, 
+      ArrowUpDown, Palette, Maximize, Crop, Image as ImageIcon,
+      Edit3, PenTool, Type as TypeIcon, Smile, Square as SquareIcon, Save,
+      MousePointer2, Zap, ImageDown, Layers, ImagePlus, HardDrive, Expand,
+      Highlighter, Bold, Italic, Underline,
+      Sun, Moon, Droplet, Sliders, SunDim, Cloud
+    } from 'lucide-react';
+
+    // 용량 단위 변환 유틸리티
+    const formatBytes = (bytes) => {
+      if (!bytes || bytes === 0 || isNaN(bytes)) return '0 B';
+      const k = 1024;
+      const sizes = ['B', 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+    };
+
+    // HEX to RGBA 변환 (형광펜 반투명 효과용)
+    const hexToRgba = (hex, alpha) => {
+      let r = 0, g = 0, b = 0;
+      if (hex.length === 4) {
+        r = parseInt(hex[1] + hex[1], 16);
+        g = parseInt(hex[2] + hex[2], 16);
+        b = parseInt(hex[3] + hex[3], 16);
+      } else if (hex.length === 7) {
+        r = parseInt(hex.substring(1, 3), 16);
+        g = parseInt(hex.substring(3, 5), 16);
+        b = parseInt(hex.substring(5, 7), 16);
+      }
+      return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    };
+
+    // 실시간 드래그 렉(Lag) 완벽 제거를 위한 초고속 슬라이더 컴포넌트
+    const PerformanceSlider = ({ label, min, max, value, onCommit, textClass, accentClass, suffix = "%" }) => {
+        const [localVal, setLocalVal] = useState(value);
+        useEffect(() => { setLocalVal(value); }, [value]);
+        return (
+            <div>
+               <div className="flex justify-between items-center text-[10px] font-black mb-2 uppercase text-slate-500">
+                  <span>{label}</span>
+                  <span className={textClass}>{localVal}{suffix}</span>
+               </div>
+               <input 
+                  type="range" min={min} max={max} value={localVal} 
+                  onChange={e => setLocalVal(Number(e.target.value))}
+                  onMouseUp={e => onCommit(Number(e.target.value))}
+                  onTouchEnd={e => onCommit(Number(e.target.value))}
+                  onKeyUp={e => onCommit(Number(e.target.value))}
+                  className={`w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer ${accentClass}`} 
+               />
+            </div>
+        );
+    };
+
+    function App() {
+      const [appMode, setAppMode] = useState('pdf');
+
+      const [files, setFiles] = useState([]);
+      const [selectedPages, setSelectedPages] = useState(new Set());
+      const [lastSelectedIdx, setLastSelectedIdx] = useState(null); 
+      
+      const [isProcessing, setIsProcessing] = useState(false);
+      const [processingMsg, setProcessingMsg] = useState("");
+      const [isExtracting, setIsExtracting] = useState(false);
+      const [dragActive, setDragActive] = useState(false);
+      const [scriptsLoaded, setScriptsLoaded] = useState(false);
+      
+      // PDF 특화 상태
+      const [addPageNumbers, setAddPageNumbers] = useState(false);
+      const [metaTitle, setMetaTitle] = useState('');
+      const [metaAuthor, setMetaAuthor] = useState('');
+      const [watermark, setWatermark] = useState('');
+      const [forceA4, setForceA4] = useState(false);
+      
+      // 이미지 추출 및 최적화 상태
+      const [grayscaleMode, setGrayscaleMode] = useState(false);
+      const [enableBatchOptimize, setEnableBatchOptimize] = useState(false);
+      const [batchQuality, setBatchQuality] = useState(80);
+      const [batchResizeMode, setBatchResizeMode] = useState('ratio'); 
+      const [batchScaleRatio, setBatchScaleRatio] = useState(100); 
+      const [batchWidth, setBatchWidth] = useState(1920);
+      const [batchHeight, setBatchHeight] = useState(1080); 
+      
+      // ✨ 추가된 기능: ZIP 압축 및 파일 이름 접미사 제어 상태
+      const [exportAsZip, setExportAsZip] = useState(true);
+      const [addNumberPrefix, setAddNumberPrefix] = useState(true);
+
+      const [batchEstimatedSizes, setBatchEstimatedSizes] = useState({});
+      const batchSizeTimerRef = useRef(null);
+      const sizeWorkerRef = useRef(null);
+
+      const [previewItem, setPreviewItem] = useState(null);
+      const [zoom, setZoom] = useState(1);
+      const [cropItem, setCropItem] = useState(null);
+      const [cropMargins, setCropMargins] = useState({ top: 0, bottom: 0, left: 0, right: 0 });
+
+      const [imageEditorItem, setImageEditorItem] = useState(null);
+      const canvasRef = useRef(null);
+      const fabricRef = useRef(null);
+      const editorContainerRef = useRef(null);
+      const [editorMode, setEditorMode] = useState('select'); 
+      const [editorColor, setEditorColor] = useState('#ef4444');
+      const [editorBrushSize, setEditorBrushSize] = useState(5);
+      const [editorQuality, setEditorQuality] = useState(90); 
+      const [editorScaleRatio, setEditorScaleRatio] = useState(100); 
+      const [editorDims, setEditorDims] = useState({ w: 0, h: 0 }); 
+      const [originalDims, setOriginalDims] = useState({ w: 0, h: 0 });
+      const [fitZoom, setFitZoom] = useState(1);
+      
+      const [editorRealSize, setEditorRealSize] = useState(null);
+      const editorSizeTimerRef = useRef(null);
+      const [editorFiltersChanged, setEditorFiltersChanged] = useState(0); 
+      
+      const [textFormat, setTextFormat] = useState({ bold: false, italic: false, underline: false });
+
+      const activeFiltersRef = useRef({ brightness: 0, contrast: 0, saturation: 0, highlights: 0, shadows: 0 });
+      const filterTimeoutRef = useRef(null);
+      const filterInstancesRef = useRef({ brightness: null, contrast: null, saturation: null, custom: null });
+
+      const fileInputRef = useRef(null);
+
+      // 백그라운드 Web Worker 초기화
+      useEffect(() => {
+        const workerCode = `
+            self.onmessage = async function(e) {
+                const files = e.data.files;
+                const results = [];
+                let totalPixels = 0;
+                let totalBytes = 0;
+
+                for (const file of files) {
+                    try {
+                        if (!self.OffscreenCanvas) throw new Error("OffscreenCanvas 미지원");
+                        
+                        const response = await fetch(file.preview);
+                        const blob = await response.blob();
+                        const bitmap = await createImageBitmap(blob);
+
+                        let drawW = file.estW;
+                        let drawH = file.estH;
+                        const maxDim = 2000;
+                        let areaMultiplier = 1;
+
+                        if (drawW > maxDim || drawH > maxDim) {
+                            const ratio = Math.min(maxDim / drawW, maxDim / drawH);
+                            drawW = Math.max(1, Math.round(drawW * ratio));
+                            drawH = Math.max(1, Math.round(drawH * ratio));
+                            areaMultiplier = (file.estW * file.estH) / (drawW * drawH);
+                        }
+
+                        const canvas = new OffscreenCanvas(drawW, drawH);
+                        const ctx = canvas.getContext('2d');
+                        
+                        if (file.grayscale) {
+                            try { ctx.filter = 'grayscale(100%)'; } catch(e) {}
+                        }
+
+                        let actualDrawW = drawW;
+                        let actualDrawH = drawH;
+
+                        if (file.cropData && (file.cropData.top > 0 || file.cropData.bottom > 0 || file.cropData.left > 0 || file.cropData.right > 0)) {
+                            const { top, bottom, left, right } = file.cropData;
+                            const cTop = top / 100, cBottom = bottom / 100, cLeft = left / 100, cRight = right / 100;
+                            actualDrawW = Math.max(1, drawW * (1 - cLeft - cRight));
+                            actualDrawH = Math.max(1, drawH * (1 - cTop - cBottom));
+                            canvas.width = actualDrawW;
+                            canvas.height = actualDrawH;
+                            ctx.drawImage(bitmap, bitmap.width * cLeft, bitmap.height * cTop, bitmap.width * (1 - cLeft - cRight), bitmap.height * (1 - cTop - cBottom), 0, 0, canvas.width, canvas.height);
+                        } else {
+                            canvas.width = drawW;
+                            canvas.height = drawH;
+                            ctx.drawImage(bitmap, 0, 0, drawW, drawH);
+                        }
+
+                        const outBlob = await canvas.convertToBlob({ type: 'image/jpeg', quality: file.quality / 100 });
+                        let size = outBlob.size;
+                        if (areaMultiplier !== 1) size = Math.round(size * areaMultiplier * 0.9);
+
+                        results.push({ id: file.id, size });
+                        totalPixels += (actualDrawW * actualDrawH * areaMultiplier);
+                        totalBytes += size;
+                    } catch(err) {
+                        let cropRatio = 1;
+                        if (file.cropData && (file.cropData.top > 0 || file.cropData.bottom > 0 || file.cropData.left > 0 || file.cropData.right > 0)) {
+                            const cTop = file.cropData.top / 100, cBottom = file.cropData.bottom / 100, cLeft = file.cropData.left / 100, cRight = file.cropData.right / 100;
+                            cropRatio = Math.max(0.01, (1 - cLeft - cRight) * (1 - cTop - cBottom));
+                        }
+                        const areaRatio = (file.estW * file.estH * cropRatio) / (file.origW * file.origH || 1);
+                        const qFactor = file.quality >= 90 ? 1 + ((file.quality - 90) / 10) * 1.2 : Math.pow(file.quality / 90, 1.5);
+                        const size = Math.round((file.baseSize || 50000) * areaRatio * qFactor * (file.grayscale ? 0.75 : 1));
+                        
+                        results.push({ id: file.id, size });
+                        totalPixels += (file.estW * file.estH * cropRatio);
+                        totalBytes += size;
+                    }
+                }
+
+                const avgBpp = totalPixels > 0 ? (totalBytes / totalPixels) : 0;
+                self.postMessage({ results, avgBpp });
+            };
+        `;
+        const blob = new Blob([workerCode], { type: 'application/javascript' });
+        sizeWorkerRef.current = new Worker(URL.createObjectURL(blob));
+
+        return () => {
+            if (sizeWorkerRef.current) sizeWorkerRef.current.terminate();
+        };
+      }, []);
+
+      // 🚀 헤더에서 정적으로 로드된 외부 라이브러리 초기화 로직
+      useEffect(() => {
+        try {
+          if (window.pdfjsLib) {
+             window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+          }
+          
+          if (window.fabric) {
+             window.fabric.enableGLFiltering = false; 
+             window.fabric.filterBackend = new window.fabric.Canvas2dFilterBackend();
+
+             if (!window.fabric.Image.filters.HighlightShadow) {
+               window.fabric.Image.filters.HighlightShadow = window.fabric.util.createClass(window.fabric.Image.filters.BaseFilter, {
+                 type: 'HighlightShadow',
+                 highlights: 0,
+                 shadows: 0,
+                 mainParameter: false,
+                 applyTo2d: function(options) {
+                   var data = options.imageData.data;
+                   var h = this.highlights / 100;
+                   var s = this.shadows / 100;
+                   var len = data.length;
+                   for (var i = 0; i < len; i += 4) {
+                     var r = data[i], g = data[i+1], b = data[i+2];
+                     var l = (r * 0.299 + g * 0.587 + b * 0.114) / 255;
+                     var invL = 1 - l;
+                     var shadowMod = invL * invL; 
+                     var highMod = l * l; 
+                     var totalMod = (s * shadowMod + h * highMod) * 255;
+                     var nr = r + totalMod, ng = g + totalMod, nb = b + totalMod;
+                     data[i]   = nr < 0 ? 0 : (nr > 255 ? 255 : nr);
+                     data[i+1] = ng < 0 ? 0 : (ng > 255 ? 255 : ng);
+                     data[i+2] = nb < 0 ? 0 : (nb > 255 ? 255 : nb);
+                   }
+                 }
+               });
+             }
+          }
+          setScriptsLoaded(true);
+        } catch (error) {
+          console.error("엔진 초기화 실패:", error);
+        }
+
+        return () => {
+          // Cleanup
+          files.forEach(f => {
+            if (f.preview && f.preview.startsWith('blob:')) URL.revokeObjectURL(f.preview);
+          });
+        };
+      }, []);
+
+      useEffect(() => {
+        if (!enableBatchOptimize || files.length === 0) {
+          setBatchEstimatedSizes({});
+          return;
+        }
+
+        if (batchSizeTimerRef.current) clearTimeout(batchSizeTimerRef.current);
+
+        batchSizeTimerRef.current = setTimeout(() => {
+          const validFiles = files.filter(f => f.type !== 'blank-page' && f.preview);
+          if (validFiles.length === 0) return;
+
+          const getEstDims = (file) => {
+              let estW = file.originalWidth || 1000;
+              let estH = file.originalHeight || 1000;
+              if (batchResizeMode === 'ratio') {
+                  estW = estW * (batchScaleRatio / 100);
+                  estH = estH * (batchScaleRatio / 100);
+              } else if (batchResizeMode === 'width' && batchWidth > 0) {
+                  estH = estH * (batchWidth / estW);
+                  estW = batchWidth;
+              } else if (batchResizeMode === 'height' && batchHeight > 0) {
+                  estW = estW * (batchHeight / estH);
+                  estH = batchHeight;
+              } else if (batchResizeMode === 'custom') {
+                  if (batchWidth > 0) estW = batchWidth;
+                  if (batchHeight > 0) estH = batchHeight;
+              }
+              return { estW: Math.max(1, Math.round(estW)), estH: Math.max(1, Math.round(estH)) };
+          };
+
+          const MAX_SAMPLES = Math.min(3, validFiles.length);
+          const sampleFiles = validFiles.slice(0, MAX_SAMPLES);
+          const restFiles = validFiles.slice(MAX_SAMPLES);
+
+          const workerPayload = sampleFiles.map(f => {
+              const { estW, estH } = getEstDims(f);
+              return {
+                  id: f.id, preview: f.preview, estW, estH,
+                  origW: f.originalWidth, origH: f.originalHeight, baseSize: f.baseSize,
+                  quality: batchQuality, grayscale: grayscaleMode, cropData: f.cropData
+              };
+          });
+
+          sizeWorkerRef.current.onmessage = (e) => {
+              const { results, avgBpp } = e.data;
+              const newSizes = {};
+              
+              results.forEach(r => newSizes[r.id] = r.size);
+
+              if (avgBpp > 0 && restFiles.length > 0) {
+                  restFiles.forEach(file => {
+                      const { estW, estH } = getEstDims(file);
+                      let pixelArea = estW * estH;
+                      if (file.cropData && (file.cropData.top > 0 || file.cropData.bottom > 0 || file.cropData.left > 0 || file.cropData.right > 0)) {
+                          const { top, bottom, left, right } = file.cropData;
+                          const cTop = top / 100, cBottom = bottom / 100, cLeft = left / 100, cRight = right / 100;
+                          pixelArea = pixelArea * (1 - cLeft - cRight) * (1 - cTop - cBottom);
+                      }
+                      newSizes[file.id] = Math.max(2048, Math.round(pixelArea * avgBpp));
+                  });
+              }
+              setBatchEstimatedSizes(prev => ({...prev, ...newSizes}));
+          };
+
+          if (sizeWorkerRef.current) {
+              sizeWorkerRef.current.postMessage({ files: workerPayload });
+          }
+
+        }, 300);
+
+        return () => clearTimeout(batchSizeTimerRef.current);
+      }, [enableBatchOptimize, batchQuality, batchResizeMode, batchScaleRatio, batchWidth, batchHeight, grayscaleMode, files]);
+
+      useEffect(() => {
+        if (!fabricRef.current || !imageEditorItem) return;
+
+        if (editorSizeTimerRef.current) clearTimeout(editorSizeTimerRef.current);
+
+        editorSizeTimerRef.current = setTimeout(() => {
+          try {
+            const canvas = fabricRef.current;
+            const multiplier = editorDims.w / canvas.width;
+            
+            const dataURL = canvas.toDataURL({
+              format: 'jpeg',
+              quality: editorQuality / 100,
+              multiplier: multiplier
+            });
+            
+            const sizeInBytes = Math.round((dataURL.length - 22) * 3 / 4);
+            setEditorRealSize(sizeInBytes);
+          } catch (err) {
+             console.error("Editor Size Calc Error:", err);
+          }
+        }, 500);
+
+        return () => clearTimeout(editorSizeTimerRef.current);
+      }, [editorDims, editorQuality, editorFiltersChanged, imageEditorItem]);
+
+      const handleModeSwitch = (mode) => {
+        if (appMode === mode) return;
+        setAppMode(mode);
+      };
+
+      const handleDrag = (e) => {
+        e.preventDefault(); e.stopPropagation();
+        if (e.type === "dragenter" || e.type === "dragover") setDragActive(true);
+        else if (e.type === "dragleave") setDragActive(false);
+      };
+
+      const handleDrop = (e) => {
+        e.preventDefault(); e.stopPropagation();
+        setDragActive(false);
+        if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+          processFiles(Array.from(e.dataTransfer.files));
+        }
+      };
+
+      const handleChange = (e) => {
+        e.preventDefault();
+        if (e.target.files && e.target.files[0]) {
+          processFiles(Array.from(e.target.files));
+        }
+      };
+
+      const processFiles = async (newFiles) => {
+        const validFiles = newFiles.filter(file => 
+          file.type === 'application/pdf' || file.type.startsWith('image/')
+        );
+
+        if (validFiles.length === 0) return;
+        setIsExtracting(true);
+
+        const newFileObjects = [];
+
+        for (const file of validFiles) {
+          if (file.type === 'application/pdf') {
+            const arrayBuffer = await file.arrayBuffer();
+            const { PDFDocument } = window.PDFLib;
+            const checkPdf = await PDFDocument.load(arrayBuffer, { ignoreEncryption: true });
+            const isEncrypted = checkPdf.isEncrypted;
+
+            try {
+              const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+              for (let i = 1; i <= pdf.numPages; i++) {
+                const page = await pdf.getPage(i);
+                const viewport = page.getViewport({ scale: 1.5 }); 
+                const canvas = document.createElement('canvas');
+                const context = canvas.getContext('2d');
+                canvas.height = viewport.height;
+                canvas.width = viewport.width;
+
+                await page.render({ canvasContext: context, viewport: viewport }).promise;
+                const previewUrl = canvas.toDataURL('image/jpeg', 0.95);
+                const baseSize = Math.round(previewUrl.length * 0.75);
+
+                newFileObjects.push({
+                  id: Math.random().toString(36).substring(2, 9) + Date.now().toString(36),
+                  originalFile: file,
+                  name: `${file.name.replace('.pdf', '')} (${i}쪽)`,
+                  type: 'pdf-page',
+                  pageIndex: i - 1, 
+                  preview: previewUrl,
+                  baseSize: baseSize,
+                  originalWidth: viewport.width,
+                  originalHeight: viewport.height,
+                  rotation: 0,
+                  cropData: null,
+                  isEncrypted: isEncrypted
+                });
+              }
+            } catch (err) {
+              const pageCount = checkPdf.getPageCount();
+              for (let i = 0; i < pageCount; i++) {
+                newFileObjects.push({
+                  id: Math.random().toString(36).substring(2, 9) + Date.now().toString(36),
+                  originalFile: file,
+                  name: `${file.name.replace('.pdf', '')} (${i + 1}쪽)`,
+                  type: 'pdf-page',
+                  pageIndex: i,
+                  preview: null,
+                  baseSize: 0,
+                  originalWidth: 0,
+                  originalHeight: 0,
+                  rotation: 0,
+                  cropData: null,
+                  isEncrypted: isEncrypted
+                });
+              }
+            }
+          } else {
+            const imgUrl = URL.createObjectURL(file);
+            const img = new Image();
+            img.src = imgUrl;
+            
+            await new Promise((resolve) => {
+               img.onload = resolve;
+               img.onerror = resolve; 
+            });
+
+            newFileObjects.push({
+              id: Math.random().toString(36).substring(2, 9) + Date.now().toString(36),
+              originalFile: file,
+              name: file.name,
+              type: 'image',
+              preview: imgUrl,
+              baseSize: file.size, 
+              originalWidth: img.width || 0,
+              originalHeight: img.height || 0,
+              rotation: 0,
+              cropData: null,
+              isEncrypted: false
+            });
+          }
+        }
+
+        setFiles(prev => [...prev, ...newFileObjects]);
+        setIsExtracting(false);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      };
+
+      const addBlankPage = () => {
+        setFiles(prev => [...prev, {
+          id: 'blank-' + Math.random().toString(36).substring(2, 9),
+          originalFile: null,
+          name: `빈 페이지 (A4)`,
+          type: 'blank-page',
+          preview: null,
+          baseSize: 50000,
+          originalWidth: 595.28,
+          originalHeight: 841.89,
+          rotation: 0,
+          cropData: null,
+          isEncrypted: false
+        }]);
+      };
+
+      const duplicateFile = (id) => {
+        setFiles(prev => {
+          const index = prev.findIndex(f => f.id === id);
+          if (index === -1) return prev;
+          const fileToCopy = prev[index];
+          const newFile = { ...fileToCopy, id: Math.random().toString(36).substring(2, 9) + Date.now().toString(36) };
+          const newFiles = [...prev];
+          newFiles.splice(index + 1, 0, newFile);
+          return newFiles;
+        });
+      };
+
+      const removeFile = (id) => {
+        setFiles(prev => {
+          const fileToRemove = prev.find(f => f.id === id);
+          if (fileToRemove && fileToRemove.preview && fileToRemove.preview.startsWith('blob:')) {
+            URL.revokeObjectURL(fileToRemove.preview);
+          }
+          return prev.filter(f => f.id !== id);
+        });
+        setSelectedPages(prev => {
+          const newSet = new Set(prev);
+          newSet.delete(id);
+          return newSet;
+        });
+      };
+
+      const removeSelected = () => {
+        if (selectedPages.size === 0) return;
+        if (window.confirm(`선택한 ${selectedPages.size}개의 항목을 삭제하시겠습니까?`)) {
+          setFiles(prev => {
+            const remaining = [];
+            prev.forEach(f => {
+              if (selectedPages.has(f.id)) {
+                if (f.preview && f.preview.startsWith('blob:')) {
+                  URL.revokeObjectURL(f.preview);
+                }
+              } else {
+                remaining.push(f);
+              }
+            });
+            return remaining;
+          });
+          setSelectedPages(new Set());
+          setLastSelectedIdx(null);
+        }
+      };
+
+      const clearAllFiles = () => {
+        if (window.confirm("모든 페이지를 초기화하시겠습니까?")) {
+          files.forEach(f => {
+            if (f.preview && f.preview.startsWith('blob:')) URL.revokeObjectURL(f.preview);
+          });
+          setFiles([]);
+          setSelectedPages(new Set());
+          setLastSelectedIdx(null);
+        }
+      };
+
+      const openCropModal = (e, file) => {
+        e.stopPropagation();
+        if (file.type === 'blank-page') return alert("빈 페이지는 자를 수 없습니다.");
+        setCropItem(file);
+        setCropMargins(file.cropData || { top: 0, bottom: 0, left: 0, right: 0 });
+      };
+
+      const saveCrop = () => {
+        setFiles(prev => prev.map(f =>
+          f.id === cropItem.id ? { ...f, cropData: cropMargins } : f
+        ));
+        setCropItem(null);
+      };
+
+      const openImageEditor = (e, file) => {
+        e.stopPropagation();
+        if (!window.fabric) return alert("에디터 엔진을 불러오는 중입니다. 잠시 후 다시 시도해주세요.");
+        if (!file.preview) return alert("편집 가능한 썸네일이 존재하지 않습니다.");
+        
+        setImageEditorItem(file);
+        setEditorMode('select');
+        setEditorQuality(90);
+        setTextFormat({ bold: false, italic: false, underline: false });
+
+        activeFiltersRef.current = { brightness: 0, contrast: 0, saturation: 0, highlights: 0, shadows: 0 };
+        
+        setTimeout(() => {
+            ['brightness', 'contrast', 'saturation', 'highlights', 'shadows'].forEach(key => {
+                const slider = document.getElementById(`slider-${key}`);
+                const valSpan = document.getElementById(`val-${key}`);
+                if (slider) slider.value = 0;
+                if (valSpan) { valSpan.innerText = '0'; valSpan.className = ''; }
+            });
+            const spinner = document.getElementById('filter-spinner');
+            if (spinner) spinner.style.display = 'none';
+        }, 50);
+
+        if (window.fabric) {
+           filterInstancesRef.current = {
+               brightness: new window.fabric.Image.filters.Brightness({ brightness: 0 }),
+               contrast: new window.fabric.Image.filters.Contrast({ contrast: 0 }),
+               saturation: new window.fabric.Image.filters.Saturation({ saturation: 0 }),
+               custom: window.fabric.Image.filters.HighlightShadow ? new window.fabric.Image.filters.HighlightShadow({ highlights: 0, shadows: 0 }) : null
+           };
+        }
+      };
+
+      const handleFilterDrag = (key, value) => {
+          const valSpan = document.getElementById(`val-${key}`);
+          if (valSpan) {
+              valSpan.innerText = value;
+              valSpan.className = value !== '0' ? 'text-indigo-600' : '';
+          }
+
+          activeFiltersRef.current[key] = Number(value);
+
+          if (filterTimeoutRef.current) clearTimeout(filterTimeoutRef.current);
+          
+          const spinner = document.getElementById('filter-spinner');
+          if (spinner) spinner.style.display = 'flex'; 
+
+          filterTimeoutRef.current = setTimeout(() => {
+              applyFiltersToCanvas();
+          }, 150);
+      };
+
+      const applyFiltersToCanvas = () => {
+          const canvas = fabricRef.current;
+          const bgImage = canvas?.backgroundImage;
+          if (!bgImage) return;
+
+          const inst = filterInstancesRef.current;
+          const vals = activeFiltersRef.current;
+          
+          bgImage.filters = [];
+
+          if (vals.brightness !== 0 && inst.brightness) { inst.brightness.brightness = vals.brightness / 100; bgImage.filters.push(inst.brightness); }
+          if (vals.contrast !== 0 && inst.contrast) { inst.contrast.contrast = vals.contrast / 100; bgImage.filters.push(inst.contrast); }
+          if (vals.saturation !== 0 && inst.saturation) { inst.saturation.saturation = vals.saturation / 100; bgImage.filters.push(inst.saturation); }
+          if ((vals.highlights !== 0 || vals.shadows !== 0) && inst.custom) { 
+              inst.custom.highlights = vals.highlights; 
+              inst.custom.shadows = vals.shadows; 
+              bgImage.filters.push(inst.custom); 
+          }
+
+          bgImage.applyFilters();
+          canvas.renderAll();
+
+          const spinner = document.getElementById('filter-spinner');
+          if (spinner) spinner.style.display = 'none';
+
+          setEditorFiltersChanged(Date.now());
+      };
+
+      const resetFilters = () => {
+          activeFiltersRef.current = { brightness: 0, contrast: 0, saturation: 0, highlights: 0, shadows: 0 };
+          ['brightness', 'contrast', 'saturation', 'highlights', 'shadows'].forEach(key => {
+              const slider = document.getElementById(`slider-${key}`);
+              const valSpan = document.getElementById(`val-${key}`);
+              if (slider) slider.value = 0;
+              if (valSpan) { valSpan.innerText = '0'; valSpan.className = ''; }
+          });
+          
+          const spinner = document.getElementById('filter-spinner');
+          if (spinner) spinner.style.display = 'flex';
+          
+          setTimeout(() => applyFiltersToCanvas(), 50);
+      };
+
+      useEffect(() => {
+        if (!imageEditorItem || !editorContainerRef.current) return;
+
+        let isMounted = true;
+        const container = editorContainerRef.current;
+        
+        container.innerHTML = '<div class="shadow-2xl bg-white rounded-lg overflow-hidden"><canvas id="fabric-canvas"></canvas></div>';
+        const canvasEl = document.getElementById('fabric-canvas');
+
+        const initTimer = setTimeout(() => {
+          if (!isMounted || !window.fabric) return;
+
+          const canvas = new window.fabric.Canvas(canvasEl, {
+            isDrawingMode: editorMode === 'draw' || editorMode === 'highlight',
+            selection: true,
+            enableRetinaScaling: false 
+          });
+          fabricRef.current = canvas;
+
+          const setupCanvas = (fabricImg) => {
+            if (!isMounted || !fabricRef.current) return;
+            
+            const cW = container.clientWidth > 100 ? container.clientWidth : 800;
+            const cH = container.clientHeight > 100 ? container.clientHeight : 600;
+            
+            const zoom = Math.min((cW - 40) / fabricImg.width, (cH - 40) / fabricImg.height, 1);
+            setFitZoom(zoom);
+            
+            canvas.setWidth(fabricImg.width * zoom);
+            canvas.setHeight(fabricImg.height * zoom);
+
+            canvas.setBackgroundImage(fabricImg, canvas.renderAll.bind(canvas), {
+              scaleX: zoom,
+              scaleY: zoom,
+              originX: 'left',
+              originY: 'top'
+            });
+            
+            setOriginalDims({ w: fabricImg.width, h: fabricImg.height });
+            setEditorDims({ w: fabricImg.width, h: fabricImg.height });
+            setEditorScaleRatio(100);
+            
+            setEditorFiltersChanged(Date.now());
+
+            if (canvas.freeDrawingBrush) {
+              const isHighlight = editorMode === 'highlight';
+              canvas.freeDrawingBrush.color = isHighlight ? hexToRgba(editorColor, 0.4) : editorColor;
+              canvas.freeDrawingBrush.width = parseInt(editorBrushSize, 10);
+            }
+          };
+
+          window.fabric.Image.fromURL(imageEditorItem.preview, (img) => {
+            if (img && img.width) {
+               setupCanvas(img);
+            } else {
+               const fallbackImg = new Image();
+               fallbackImg.onload = () => {
+                 const fImg = new window.fabric.Image(fallbackImg);
+                 setupCanvas(fImg);
+               };
+               fallbackImg.onerror = () => {
+                 if (isMounted) alert("이미지 렌더링에 실패했습니다. 파일을 다시 업로드해주세요.");
+               };
+               fallbackImg.src = imageEditorItem.preview;
+            }
+          });
+
+          const handleKeyDown = (e) => {
+            if (e.key === 'Delete' || e.key === 'Backspace') {
+              if (['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
+              const activeObjects = canvas.getActiveObjects();
+              if (activeObjects.length) {
+                activeObjects.forEach(obj => canvas.remove(obj));
+                canvas.discardActiveObject();
+                canvas.renderAll(); 
+                setEditorFiltersChanged(Date.now()); 
+              }
+            }
+          };
+          window.addEventListener('keydown', handleKeyDown);
+          container._handleKeyDown = handleKeyDown;
+
+          const handleSelection = () => {
+            const obj = canvas.getActiveObject();
+            if (obj && obj.type === 'i-text') {
+              setTextFormat({
+                bold: obj.fontWeight === 'bold',
+                italic: obj.fontStyle === 'italic',
+                underline: obj.underline || false
+              });
+            } else {
+              setTextFormat({ bold: false, italic: false, underline: false });
+            }
+          };
+          canvas.on('selection:created', handleSelection);
+          canvas.on('selection:updated', handleSelection);
+          canvas.on('selection:cleared', handleSelection);
+          
+          canvas.on('object:modified', () => setEditorFiltersChanged(Date.now()));
+          canvas.on('path:created', () => setEditorFiltersChanged(Date.now()));
+
+        }, 150);
+
+        return () => {
+          isMounted = false;
+          clearTimeout(initTimer);
+          if (editorContainerRef.current && editorContainerRef.current._handleKeyDown) {
+             window.removeEventListener('keydown', editorContainerRef.current._handleKeyDown);
+             delete editorContainerRef.current._handleKeyDown;
+          }
+          if (fabricRef.current) {
+            fabricRef.current.dispose();
+            fabricRef.current = null;
+          }
+          if (editorContainerRef.current) {
+             editorContainerRef.current.innerHTML = '';
+          }
+        };
+      }, [imageEditorItem]);
+
+      useEffect(() => {
+        if (!fabricRef.current) return;
+        const canvas = fabricRef.current;
+        const isDrawing = editorMode === 'draw' || editorMode === 'highlight';
+        
+        canvas.isDrawingMode = isDrawing;
+        if (isDrawing && canvas.freeDrawingBrush) {
+          canvas.freeDrawingBrush.color = editorMode === 'highlight' ? hexToRgba(editorColor, 0.4) : editorColor;
+          canvas.freeDrawingBrush.width = parseInt(editorBrushSize, 10);
+        }
+      }, [editorMode, editorColor, editorBrushSize]);
+
+      const toggleTextFormat = (type) => {
+        setTextFormat(prev => {
+          const next = { ...prev, [type]: !prev[type] };
+          if (fabricRef.current) {
+             const obj = fabricRef.current.getActiveObject();
+             if (obj && obj.type === 'i-text') {
+                if (type === 'bold') obj.set('fontWeight', next.bold ? 'bold' : 'normal');
+                if (type === 'italic') obj.set('fontStyle', next.italic ? 'italic' : 'normal');
+                if (type === 'underline') obj.set('underline', next.underline);
+                fabricRef.current.renderAll();
+                setEditorFiltersChanged(Date.now());
+             }
+          }
+          return next;
+        });
+      };
+
+      const addTextToCanvas = () => {
+        if (!fabricRef.current) return;
+        const text = new window.fabric.IText('텍스트 입력', {
+          left: fabricRef.current.width / 2,
+          top: fabricRef.current.height / 2,
+          fill: editorColor,
+          fontSize: 40,
+          fontFamily: 'sans-serif',
+          originX: 'center',
+          originY: 'center',
+          fontWeight: textFormat.bold ? 'bold' : 'normal',
+          fontStyle: textFormat.italic ? 'italic' : 'normal',
+          underline: textFormat.underline
+        });
+        fabricRef.current.add(text);
+        fabricRef.current.setActiveObject(text);
+        fabricRef.current.renderAll();
+        setEditorMode('select');
+        setEditorFiltersChanged(Date.now());
+      };
+
+      const addCensorBox = () => {
+        if (!fabricRef.current) return;
+        const rect = new window.fabric.Rect({
+          left: fabricRef.current.width / 2,
+          top: fabricRef.current.height / 2,
+          width: 150,
+          height: 60,
+          fill: '#0f172a', 
+          rx: 0, ry: 0, 
+          originX: 'center',
+          originY: 'center',
+          opacity: 1
+        });
+        fabricRef.current.add(rect);
+        fabricRef.current.setActiveObject(rect);
+        fabricRef.current.renderAll();
+        setEditorMode('select');
+        setEditorFiltersChanged(Date.now());
+      };
+
+      const deleteSelectedFabricObj = () => {
+        if (!fabricRef.current) return;
+        const activeObjects = fabricRef.current.getActiveObjects();
+        if (activeObjects.length > 0) {
+          activeObjects.forEach(obj => fabricRef.current.remove(obj));
+          fabricRef.current.discardActiveObject();
+          fabricRef.current.renderAll();
+          setEditorFiltersChanged(Date.now());
+        }
+      };
+
+      const saveImageEditor = async () => {
+        if (!fabricRef.current) return;
+        setIsProcessing(true);
+        setProcessingMsg("이미지 렌더링 중...");
+
+        try {
+          fabricRef.current.discardActiveObject();
+          fabricRef.current.renderAll();
+
+          const multiplier = editorDims.w / fabricRef.current.width;
+          
+          const dataURL = fabricRef.current.toDataURL({
+            format: 'jpeg',
+            quality: editorQuality / 100,
+            multiplier: multiplier
+          });
+
+          const res = await fetch(dataURL);
+          const blob = await res.blob();
+          const newFile = new File([blob], imageEditorItem.name + '_edited.jpg', { type: 'image/jpeg' });
+
+          setFiles(prev => prev.map(f => {
+            if (f.id === imageEditorItem.id) {
+              if (f.preview && f.preview.startsWith('blob:')) URL.revokeObjectURL(f.preview);
+              
+              return {
+                ...f,
+                originalFile: newFile,
+                preview: URL.createObjectURL(newFile),
+                baseSize: blob.size,
+                originalWidth: editorDims.w,
+                originalHeight: editorDims.h,
+                type: 'image', 
+                cropData: null, 
+                rotation: 0
+              };
+            }
+            return f;
+          }));
+
+          setImageEditorItem(null);
+        } catch (err) {
+          console.error(err);
+          alert("이미지 저장에 실패했습니다.");
+        } finally {
+          setIsProcessing(false);
+          setProcessingMsg("");
+        }
+      };
+
+      const getOptimizedCanvas = (sourceCanvas) => {
+        if (!enableBatchOptimize) return sourceCanvas;
+        
+        let tw = sourceCanvas.width;
+        let th = sourceCanvas.height;
+
+        if (batchResizeMode === 'ratio') {
+          tw = tw * (batchScaleRatio / 100);
+          th = th * (batchScaleRatio / 100);
+        } else if (batchResizeMode === 'width') {
+          if (batchWidth > 0) {
+            th = th * (batchWidth / tw);
+            tw = batchWidth;
+          }
+        } else if (batchResizeMode === 'height') {
+          if (batchHeight > 0) {
+            tw = tw * (batchHeight / th);
+            th = batchHeight;
+          }
+        } else if (batchResizeMode === 'custom') {
+          if (batchWidth > 0) tw = batchWidth;
+          if (batchHeight > 0) th = batchHeight;
+        }
+
+        if (tw === sourceCanvas.width && th === sourceCanvas.height) return sourceCanvas;
+        
+        const destCanvas = document.createElement('canvas');
+        destCanvas.width = tw;
+        destCanvas.height = th;
+        const ctx = destCanvas.getContext('2d');
+        ctx.drawImage(sourceCanvas, 0, 0, tw, th);
+        return destCanvas;
+      };
+
+      const getCroppedCanvas = (sourceCanvas, cropData) => {
+        if (!cropData || (cropData.top===0 && cropData.bottom===0 && cropData.left===0 && cropData.right===0)) return sourceCanvas;
+        const { top, bottom, left, right } = cropData;
+        const cTop = top/100, cBottom = bottom/100, cLeft = left/100, cRight = right/100;
+        const destCanvas = document.createElement('canvas');
+        destCanvas.width = sourceCanvas.width * (1 - cLeft - cRight);
+        destCanvas.height = sourceCanvas.height * (1 - cTop - cBottom);
+        const ctx = destCanvas.getContext('2d');
+        ctx.drawImage(sourceCanvas,
+            sourceCanvas.width * cLeft, sourceCanvas.height * cTop, destCanvas.width, destCanvas.height,
+            0, 0, destCanvas.width, destCanvas.height
+        );
+        return destCanvas;
+      };
+
+      const downloadSingleImage = async (e, file) => {
+        e.stopPropagation();
+        if (!file.preview) return alert("미리보기를 지원하지 않는 페이지입니다.");
+        
+        setIsProcessing(true);
+        setProcessingMsg("단일 이미지 생성 중...");
+        
+        try {
+            const img = new Image();
+            img.src = file.preview;
+            await new Promise(res => img.onload = res);
+            
+            let canvas = document.createElement('canvas');
+            canvas.width = img.width;
+            canvas.height = img.height;
+            let ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+            
+            if (file.cropData) {
+                canvas = getCroppedCanvas(canvas, file.cropData);
+            }
+            
+            if (file.rotation !== 0) {
+                const rCanvas = document.createElement('canvas');
+                const rCtx = rCanvas.getContext('2d');
+                if (file.rotation % 180 !== 0) {
+                    rCanvas.width = canvas.height; rCanvas.height = canvas.width;
+                } else {
+                    rCanvas.width = canvas.width; rCanvas.height = canvas.height;
+                }
+                rCtx.translate(rCanvas.width/2, rCanvas.height/2);
+                rCtx.rotate((file.rotation * Math.PI) / 180);
+                rCtx.drawImage(canvas, -canvas.width/2, -canvas.height/2);
+                canvas = rCanvas;
+            }
+
+            canvas = getOptimizedCanvas(canvas);
+            const exportQuality = enableBatchOptimize ? batchQuality / 100 : 0.95;
+            
+            const link = document.createElement('a');
+            link.href = canvas.toDataURL('image/jpeg', exportQuality);
+            link.download = `${file.name.replace('.pdf', '')}_extracted.jpg`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        } catch (err) {
+            console.error(err);
+            alert("이미지 저장 중 오류가 발생했습니다.");
+        } finally {
+            setIsProcessing(false);
+            setProcessingMsg("");
+        }
+      };
+
+      const handlePageSelect = (e, id, index) => {
+        e.stopPropagation();
+        if (e.shiftKey && lastSelectedIdx !== null) {
+          const start = Math.min(lastSelectedIdx, index);
+          const end = Math.max(lastSelectedIdx, index);
+          const newSet = new Set(selectedPages);
+          for (let i = start; i <= end; i++) {
+            newSet.add(files[i].id);
+          }
+          setSelectedPages(newSet);
+        } else {
+          toggleSelection(id);
+          setLastSelectedIdx(index);
+        }
+      };
+
+      const toggleSelection = (id) => {
+        setSelectedPages(prev => {
+          const newSet = new Set(prev);
+          if (newSet.has(id)) newSet.delete(id); else newSet.add(id);
+          return newSet;
+        });
+      };
+
+      const selectAll = () => {
+        if (selectedPages.size === files.length) {
+          setSelectedPages(new Set());
+          setLastSelectedIdx(null);
+        } else {
+          setSelectedPages(new Set(files.map(f => f.id)));
+        }
+      };
+
+      const rotateFile = (id) => setFiles(prev => prev.map(f => f.id === id ? { ...f, rotation: (f.rotation + 90) % 360 } : f));
+      const sortFilesAlphabetically = () => setFiles([...files].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })));
+      const reverseFiles = () => setFiles([...files].reverse());
+
+      const handleItemDragStart = (e, index) => e.dataTransfer.setData('itemIndex', index);
+      const handleItemDrop = (e, targetIndex) => {
+        const sourceIndex = parseInt(e.dataTransfer.getData('itemIndex'), 10);
+        if (sourceIndex === targetIndex || isNaN(sourceIndex)) return;
+        const newFiles = [...files];
+        const [draggedItem] = newFiles.splice(sourceIndex, 1);
+        newFiles.splice(targetIndex, 0, draggedItem);
+        setFiles(newFiles);
+      };
+
+      // ✨ 확장된 executeGeneration 로직 (ZIP 생성 및 파일명 접미사 적용)
+      const executeGeneration = async (targetFiles, format = 'pdf') => {
+        if (!window.PDFLib || targetFiles.length === 0) return;
+
+        if (format === 'images') {
+           if (targetFiles.length > 1 && !exportAsZip) {
+               const confirmDl = window.confirm(`총 ${targetFiles.length}장의 이미지를 개별 파일로 즉시 다운로드합니다.\n※ 브라우저 상단에서 [다중 다운로드 허용] 팝업이 뜨면 반드시 허용해주세요.\n(설정에서 ZIP 압축 옵션을 사용하면 하나의 파일로 다운로드할 수 있습니다.)`);
+               if (!confirmDl) return;
+           }
+        }
+
+        setIsProcessing(true);
+        setProcessingMsg("작업을 준비 중입니다...");
+        
+        const exportQuality = enableBatchOptimize ? (batchQuality / 100) : 0.95;
+
+        try {
+          const { PDFDocument, degrees, rgb, PageSizes } = window.PDFLib;
+          const A4_WIDTH = 595.28;
+          const A4_HEIGHT = 841.89;
+
+          if (format === 'images') {
+            let zip = null;
+            if (exportAsZip && targetFiles.length > 1) {
+              if (!window.JSZip) {
+                  alert("ZIP 라이브러리를 불러오는 중입니다. 잠시 후 다시 시도해주세요.");
+                  setIsProcessing(false);
+                  return;
+              }
+              zip = new window.JSZip();
+            }
+
+            const nameCount = {}; // 이름 중복 방지를 위한 객체
+
+            for (let idx = 0; idx < targetFiles.length; idx++) {
+              const item = targetFiles[idx];
+              setProcessingMsg(`이미지 렌더링 및 준비 중... (${idx + 1}/${targetFiles.length})`);
+              
+              let imgDataUrl = null;
+
+              if (item.type === 'blank-page') {
+                 let canvas = document.createElement('canvas');
+                 canvas.width = A4_WIDTH; canvas.height = A4_HEIGHT;
+                 const ctx = canvas.getContext('2d');
+                 ctx.fillStyle = "white"; ctx.fillRect(0, 0, A4_WIDTH, A4_HEIGHT);
+                 canvas = getOptimizedCanvas(canvas);
+                 imgDataUrl = canvas.toDataURL('image/jpeg', exportQuality);
+              } 
+              else if (item.type === 'pdf-page') {
+                const arrayBuffer = await item.originalFile.arrayBuffer();
+                const pdfjsDoc = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+                const page = await pdfjsDoc.getPage(item.pageIndex + 1);
+                const viewport = page.getViewport({ scale: 4.0 }); 
+                let canvas = document.createElement('canvas');
+                canvas.width = viewport.width; canvas.height = viewport.height;
+                const ctx = canvas.getContext('2d');
+                
+                if (grayscaleMode) ctx.filter = 'grayscale(100%)';
+                await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+                
+                canvas = getCroppedCanvas(canvas, item.cropData);
+
+                if (item.rotation !== 0) {
+                  const rotCanvas = document.createElement('canvas');
+                  const rCtx = rotCanvas.getContext('2d');
+                  if (item.rotation % 180 !== 0) {
+                    rotCanvas.width = canvas.height; rotCanvas.height = canvas.width;
+                  } else {
+                    rotCanvas.width = canvas.width; rotCanvas.height = canvas.height;
+                  }
+                  rCtx.translate(rotCanvas.width/2, rotCanvas.height/2);
+                  rCtx.rotate((item.rotation * Math.PI) / 180);
+                  rCtx.drawImage(canvas, -canvas.width/2, -canvas.height/2);
+                  canvas = rotCanvas;
+                }
+                
+                canvas = getOptimizedCanvas(canvas);
+                imgDataUrl = canvas.toDataURL('image/jpeg', exportQuality);
+              } 
+              else if (item.type === 'image') {
+                const img = new Image();
+                img.src = URL.createObjectURL(item.originalFile);
+                await new Promise(res => img.onload = res);
+                let canvas = document.createElement('canvas');
+                canvas.width = img.width; canvas.height = img.height;
+                const ctx = canvas.getContext('2d');
+                if (grayscaleMode) ctx.filter = 'grayscale(100%)';
+                ctx.drawImage(img, 0, 0);
+
+                canvas = getCroppedCanvas(canvas, item.cropData);
+                
+                if (item.rotation !== 0) {
+                  const rotCanvas = document.createElement('canvas');
+                  const rCtx = rotCanvas.getContext('2d');
+                  if (item.rotation % 180 !== 0) { rotCanvas.width = canvas.height; rotCanvas.height = canvas.width; }
+                  else { rotCanvas.width = canvas.width; rotCanvas.height = canvas.height; }
+                  rCtx.translate(rotCanvas.width/2, rotCanvas.height/2);
+                  rCtx.rotate((item.rotation * Math.PI) / 180);
+                  rCtx.drawImage(canvas, -canvas.width/2, -canvas.height/2);
+                  canvas = rotCanvas;
+                }
+                
+                canvas = getOptimizedCanvas(canvas);
+                imgDataUrl = canvas.toDataURL('image/jpeg', exportQuality);
+              }
+
+              if (imgDataUrl) {
+                let cleanName = item.name.replace('.pdf', '').replace(/[/\\?%*:|"<>]/g, '-');
+                let finalName = "";
+
+                // 파일명 접미사 적용 여부 처리
+                if (addNumberPrefix) {
+                    finalName = `${String(idx + 1).padStart(3, '0')}_${cleanName}.jpg`;
+                } else {
+                    // 번호 접미사가 없을 때, 중복된 이름이 들어오면 덮어씌워지지 않게 방어
+                    if (nameCount[cleanName]) {
+                        finalName = `${cleanName} (${nameCount[cleanName]}).jpg`;
+                        nameCount[cleanName]++;
+                    } else {
+                        finalName = `${cleanName}.jpg`;
+                        nameCount[cleanName] = 1;
+                    }
+                }
+
+                if (zip) {
+                    // ZIP 파일 내부에 이미지 추가 (base64 메타데이터 제거)
+                    zip.file(finalName, imgDataUrl.split(',')[1], {base64: true});
+                } else {
+                    // 개별 다운로드
+                    const link = document.createElement('a');
+                    link.href = imgDataUrl;
+                    link.download = finalName;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+
+                    await new Promise(r => setTimeout(r, 400));
+                }
+              }
+            }
+
+            // 모든 이미지 처리가 끝난 후 ZIP 일괄 다운로드 실행
+            if (zip) {
+               setProcessingMsg("ZIP 파일 생성 중...");
+               const zipBlob = await zip.generateAsync({type:"blob"});
+               const link = document.createElement('a');
+               link.href = URL.createObjectURL(zipBlob);
+               link.download = `Images_${Date.now()}.zip`;
+               document.body.appendChild(link);
+               link.click();
+               document.body.removeChild(link);
+               URL.revokeObjectURL(link.href);
+            }
+
+            setIsProcessing(false);
+            setProcessingMsg("");
+            return; 
+          }
+
+          const finalDoc = await PDFDocument.create();
+          finalDoc.registerFontkit(window.fontkit);
+          
+          let customFont = null;
+          try {
+            const fontUrl = 'https://cdn.jsdelivr.net/gh/orioncactus/pretendard/packages/pretendard/dist/public/static/Pretendard-Regular.ttf';
+            const fontBytes = await fetch(fontUrl).then(res => res.arrayBuffer());
+            customFont = await finalDoc.embedFont(fontBytes);
+          } catch (fontErr) { console.warn("한글 폰트 로드 실패"); }
+
+          const loadedPdfsCache = new Map();
+          const pdfjsDocCache = new Map();
+
+          for (let idx = 0; idx < targetFiles.length; idx++) {
+            const item = targetFiles[idx];
+            setProcessingMsg(`PDF 합성 중... (${idx + 1}/${targetFiles.length})`);
+
+            let embeddedImage = null;
+            let copiedPage = null;
+
+            if (item.type === 'blank-page') {
+               const p = finalDoc.addPage([A4_WIDTH, A4_HEIGHT]);
+               if (item.rotation !== 0) p.setRotation(degrees(item.rotation));
+               continue;
+            }
+
+            const arrayBuffer = await item.originalFile.arrayBuffer();
+
+            const hasCrop = item.cropData && (item.cropData.top>0||item.cropData.bottom>0||item.cropData.left>0||item.cropData.right>0);
+            const forceRasterize = grayscaleMode || item.isEncrypted || (hasCrop && forceA4) || enableBatchOptimize; 
+
+            if (item.type === 'pdf-page') {
+              if (forceRasterize) {
+                let pdfjsDoc = pdfjsDocCache.get(item.originalFile);
+                if (!pdfjsDoc) {
+                  const freshBuffer = await item.originalFile.arrayBuffer();
+                  pdfjsDoc = await window.pdfjsLib.getDocument({ data: freshBuffer }).promise;
+                  pdfjsDocCache.set(item.originalFile, pdfjsDoc);
+                }
+                const page = await pdfjsDoc.getPage(item.pageIndex + 1);
+                const viewport = page.getViewport({ scale: 4.0 }); 
+                let canvas = document.createElement('canvas');
+                canvas.width = viewport.width; canvas.height = viewport.height;
+                const ctx = canvas.getContext('2d');
+                
+                if (grayscaleMode) ctx.filter = 'grayscale(100%)';
+                await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+                
+                canvas = getCroppedCanvas(canvas, item.cropData);
+                canvas = getOptimizedCanvas(canvas);
+                
+                embeddedImage = await finalDoc.embedJpg(canvas.toDataURL('image/jpeg', exportQuality));
+              } else {
+                let loadedPdf = loadedPdfsCache.get(item.originalFile);
+                if (!loadedPdf) {
+                  loadedPdf = await PDFDocument.load(arrayBuffer, { ignoreEncryption: true });
+                  loadedPdfsCache.set(item.originalFile, loadedPdf);
+                }
+                [copiedPage] = await finalDoc.copyPages(loadedPdf, [item.pageIndex]);
+
+                if (hasCrop) {
+                  const { top, bottom, left, right } = item.cropData;
+                  const { x, y, width, height } = copiedPage.getCropBox() || copiedPage.getMediaBox();
+                  const cTop = top/100, cBottom = bottom/100, cLeft = left/100, cRight = right/100;
+                  
+                  const newX = x + (width * cLeft);
+                  const newY = y + (height * cBottom);
+                  const newW = width * (1 - cLeft - cRight);
+                  const newH = height * (1 - cTop - cBottom);
+                  copiedPage.setCropBox(newX, newY, newW, newH);
+                }
+              }
+            } 
+            else if (item.type === 'image') {
+              if (grayscaleMode || hasCrop || enableBatchOptimize) {
+                 const img = new Image();
+                 img.src = URL.createObjectURL(item.originalFile);
+                 await new Promise(res => img.onload = res);
+                 let canvas = document.createElement('canvas');
+                 canvas.width = img.width; canvas.height = img.height;
+                 const ctx = canvas.getContext('2d');
+                 if (grayscaleMode) ctx.filter = 'grayscale(100%)';
+                 ctx.drawImage(img, 0, 0);
+
+                 canvas = getCroppedCanvas(canvas, item.cropData);
+                 canvas = getOptimizedCanvas(canvas);
+                 embeddedImage = await finalDoc.embedJpg(canvas.toDataURL('image/jpeg', exportQuality));
+              } else {
+                 if (item.originalFile.type === 'image/jpeg') embeddedImage = await finalDoc.embedJpg(arrayBuffer);
+                 else if (item.originalFile.type === 'image/png') embeddedImage = await finalDoc.embedPng(arrayBuffer);
+              }
+            }
+
+            if (copiedPage) {
+              if (forceA4) {
+                 const pageDims = copiedPage.getSize();
+                 const embeddedPage = await finalDoc.embedPage(copiedPage);
+                 const newPage = finalDoc.addPage(PageSizes.A4);
+                 const scale = Math.min(A4_WIDTH / pageDims.width, A4_HEIGHT / pageDims.height);
+                 const scaledWidth = pageDims.width * scale;
+                 const scaledHeight = pageDims.height * scale;
+                 newPage.drawPage(embeddedPage, {
+                   x: (A4_WIDTH - scaledWidth) / 2,
+                   y: (A4_HEIGHT - scaledHeight) / 2,
+                   width: scaledWidth, height: scaledHeight,
+                 });
+                 if (item.rotation !== 0) newPage.setRotation(degrees(item.rotation));
+              } else {
+                 if (item.rotation !== 0) {
+                   const currentRotation = copiedPage.getRotation().angle;
+                   copiedPage.setRotation(degrees(currentRotation + item.rotation));
+                 }
+                 finalDoc.addPage(copiedPage);
+              }
+            } else if (embeddedImage) {
+              const dims = { width: embeddedImage.width, height: embeddedImage.height };
+              if (forceA4) {
+                 const newPage = finalDoc.addPage(PageSizes.A4);
+                 const scale = Math.min(A4_WIDTH / dims.width, A4_HEIGHT / dims.height);
+                 const scaledWidth = dims.width * scale;
+                 const scaledHeight = dims.height * scale;
+                 newPage.drawImage(embeddedImage, {
+                   x: (A4_WIDTH - scaledWidth) / 2,
+                   y: (A4_HEIGHT - scaledHeight) / 2,
+                   width: scaledWidth, height: scaledHeight,
+                 });
+                 if (item.rotation !== 0) newPage.setRotation(degrees(item.rotation));
+              } else {
+                 const newPage = finalDoc.addPage([dims.width, dims.height]);
+                 newPage.drawImage(embeddedImage, { x: 0, y: 0, width: dims.width, height: dims.height });
+                 if (item.rotation !== 0) newPage.setRotation(degrees(item.rotation));
+              }
+            }
+          }
+
+          setProcessingMsg("후처리 및 워터마크 주입 중...");
+          
+          if (metaTitle) finalDoc.setTitle(metaTitle);
+          if (metaAuthor) finalDoc.setAuthor(metaAuthor);
+          finalDoc.setCreator('PDF Master Editor Ultimate');
+
+          const pages = finalDoc.getPages();
+          const fallbackFont = await finalDoc.embedFont(window.PDFLib.StandardFonts.Helvetica);
+          const activeFont = customFont || fallbackFont;
+
+          pages.forEach((page, idx) => {
+            const { width, height } = page.getSize();
+            const rotationAngle = page.getRotation().angle;
+
+            if (addPageNumbers) {
+              const text = `${idx + 1} / ${pages.length}`;
+              const textWidth = activeFont.widthOfTextAtSize(text, 12);
+              let x, y;
+
+              if (rotationAngle === 0 || rotationAngle === 360) { x = width / 2 - textWidth / 2; y = 20; }
+              else if (rotationAngle === 90) { x = width - 20; y = height / 2 - textWidth / 2; }
+              else if (rotationAngle === 180) { x = width / 2 + textWidth / 2; y = height - 20; }
+              else if (rotationAngle === 270) { x = 20; y = height / 2 + textWidth / 2; }
+
+              page.drawText(text, {
+                x, y, size: 12, font: activeFont, color: grayscaleMode ? rgb(0,0,0) : rgb(0.2, 0.2, 0.2), rotate: degrees(0)
+              });
+            }
+
+            if (watermark) {
+              const fontSize = 70;
+              const textWidth = activeFont.widthOfTextAtSize(watermark, fontSize);
+              const textHeight = activeFont.heightAtSize(fontSize);
+              const x = width / 2 - textWidth / 2;
+              const y = height / 2 - textHeight / 2;
+
+              page.drawText(watermark, {
+                x, y, size: fontSize, font: activeFont, 
+                color: grayscaleMode ? rgb(0.6,0.6,0.6) : rgb(0.8, 0.1, 0.1),
+                opacity: 0.25, rotate: degrees(45)
+              });
+            }
+          });
+
+          setProcessingMsg("최종 인코딩 완료 대기 중...");
+          const pdfBytes = await finalDoc.save();
+          const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          
+          let defaultName = metaTitle ? `${metaTitle}.pdf` : (targetFiles.length < files.length ? 'extracted_pages.pdf' : 'merged_document_pro.pdf');
+          if (grayscaleMode) defaultName = defaultName.replace('.pdf', '_BW.pdf');
+          
+          link.href = url;
+          link.download = defaultName;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          URL.revokeObjectURL(url);
+
+        } catch (error) {
+          console.error("PDF 생성 에러:", error);
+          alert("생성 중 오류가 발생했습니다.\n" + error.message);
+        } finally {
+          setIsProcessing(false);
+          setProcessingMsg("");
+        }
+      };
+
+      return (
+        <div className={`min-h-screen bg-slate-100 text-slate-800 font-sans p-4 sm:p-6 pb-24 ${appMode === 'pdf' ? 'selection:bg-indigo-200' : 'selection:bg-purple-200'}`}>
+          <div className="max-w-[1400px] mx-auto space-y-6">
+            
+            {/* Header */}
+            <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200/60 flex flex-col xl:flex-row items-center justify-between gap-6">
+              <div className="flex flex-col sm:flex-row items-center gap-6 w-full xl:w-auto">
+                <div>
+                  <h1 className="text-3xl font-black text-slate-900 flex items-center gap-2 tracking-tight">
+                    {appMode === 'pdf' ? <Layers className="text-indigo-600 w-8 h-8" /> : <ImagePlus className="text-purple-600 w-8 h-8" />}
+                    Studio <span className={`text-transparent bg-clip-text bg-gradient-to-r ${appMode==='pdf' ? 'from-indigo-600 to-blue-600' : 'from-purple-600 to-pink-600'}`}>Ultimate</span>
+                  </h1>
+                  <p className="text-sm text-slate-500 mt-1.5 font-bold">
+                    {appMode === 'pdf' ? '문서 병합, 메타데이터 편집 및 PDF 출력 엔진' : '이미지 자르기, 형광펜, 밑줄 및 다중 이미지 추출 엔진'}
+                  </p>
+                </div>
+                
+                <div className="flex bg-slate-100 p-1.5 rounded-2xl border border-slate-200/80 shadow-inner w-full sm:w-auto">
+                  <button onClick={() => handleModeSwitch('pdf')} className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-6 py-3 rounded-xl font-black transition-all duration-300 ${appMode === 'pdf' ? 'bg-white text-indigo-700 shadow-sm ring-1 ring-slate-200/50' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-200/50'}`}>
+                    <FileText size={18} /> PDF 편집기
+                  </button>
+                  <button onClick={() => handleModeSwitch('image')} className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-6 py-3 rounded-xl font-black transition-all duration-300 ${appMode === 'image' ? 'bg-white text-purple-700 shadow-sm ring-1 ring-slate-200/50' : 'text-slate-400 hover:text-slate-600 hover:bg-slate-200/50'}`}>
+                    <ImageIcon size={18} /> 이미지 스튜디오
+                  </button>
+                </div>
+              </div>
+
+              {!scriptsLoaded && (
+                <span className={`text-sm flex items-center gap-2 animate-pulse bg-white px-5 py-2.5 rounded-full font-bold shadow-sm ${appMode === 'pdf' ? 'text-indigo-600 border-indigo-100' : 'text-purple-600 border-purple-100'} shrink-0`}>
+                  <div className={`w-4 h-4 border-[3px] border-t-transparent rounded-full animate-spin ${appMode === 'pdf' ? 'border-indigo-600' : 'border-purple-600'}`} /> 엔진 부팅 중...
+                </span>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+              
+              {/* Main Workspace */}
+              <div className="lg:col-span-8 xl:col-span-9 space-y-5">
+                
+                {/* Dropzone */}
+                <div 
+                  className={`relative border-2 border-dashed rounded-3xl p-10 flex flex-col items-center justify-center transition-all cursor-pointer overflow-hidden
+                    ${dragActive ? (appMode === 'pdf' ? 'border-indigo-500 bg-indigo-50/50 scale-[1.01]' : 'border-purple-500 bg-purple-50/50 scale-[1.01]') : 'border-slate-300 bg-white hover:bg-slate-50'}
+                    ${isExtracting ? (appMode === 'pdf' ? 'opacity-60 pointer-events-none border-indigo-300' : 'opacity-60 pointer-events-none border-purple-300') : ''}`}
+                  onDragEnter={handleDrag} onDragLeave={handleDrag} onDragOver={handleDrag} onDrop={handleDrop}
+                  onClick={() => !isExtracting && fileInputRef.current?.click()}
+                >
+                  <input ref={fileInputRef} type="file" multiple accept=".pdf, image/jpeg, image/png" onChange={handleChange} className="hidden" disabled={isExtracting} />
+                  
+                  {isExtracting ? (
+                    <div className="flex flex-col items-center py-4 z-10">
+                      <div className={`w-12 h-12 border-[4px] border-t-transparent rounded-full animate-spin mb-5 shadow-lg ${appMode === 'pdf' ? 'border-indigo-500' : 'border-purple-500'}`} />
+                      <p className={`text-xl font-black ${appMode === 'pdf' ? 'text-indigo-800' : 'text-purple-800'}`}>파일 스캔 및 분할 중...</p>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center z-10">
+                      <div className={`p-4 rounded-full mb-4 group-hover:scale-110 transition-transform ${appMode === 'pdf' ? 'bg-indigo-50 text-indigo-400 group-hover:text-indigo-600' : 'bg-purple-50 text-purple-400 group-hover:text-purple-600'}`}>
+                        <UploadCloud className="w-10 h-10" />
+                      </div>
+                      <p className="text-xl font-black text-slate-700">여기를 클릭하거나 파일을 드래그 & 드롭</p>
+                      <p className="text-sm text-slate-500 mt-2 font-bold bg-white px-3 py-1 rounded-full shadow-sm border border-slate-100">지원 형식: PDF, JPG, PNG</p>
+                    </div>
+                  )}
+                </div>
+
+                {/* File List / Grid */}
+                {files.length > 0 && (
+                  <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200/60">
+                    
+                    {/* Advanced Toolbar */}
+                    <div className="flex flex-col xl:flex-row items-start xl:items-center justify-between mb-5 pb-5 border-b border-slate-100 gap-4">
+                      
+                      <div className="flex items-center gap-3">
+                        <button onClick={selectAll} className={`flex items-center gap-1.5 text-sm text-slate-700 transition-colors font-black bg-slate-100 px-4 py-2 rounded-xl active:scale-95 ${appMode === 'pdf' ? 'hover:text-indigo-700 hover:bg-indigo-50' : 'hover:text-purple-700 hover:bg-purple-50'}`}>
+                          {selectedPages.size === files.length ? <CheckSquare size={16} className={appMode === 'pdf' ? 'text-indigo-600' : 'text-purple-600'} /> : <Square size={16} />}
+                          {selectedPages.size === files.length ? '선택 해제' : '모두 선택'}
+                        </button>
+                        <div className="flex flex-col">
+                          <span className="text-sm font-black text-slate-800">총 <span className={`text-base ${appMode === 'pdf' ? 'text-indigo-600' : 'text-purple-600'}`}>{files.length}</span> 장</span>
+                        </div>
+                      </div>
+                      
+                      <div className="flex flex-wrap items-center gap-2">
+                        {selectedPages.size > 0 ? (
+                          <>
+                            {appMode === 'pdf' ? (
+                              <button onClick={() => executeGeneration(files.filter(f => selectedPages.has(f.id)), 'pdf')} className="flex items-center gap-1.5 text-sm bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl transition-all font-bold shadow-md hover:shadow-lg active:scale-95">
+                                <FileDown size={16} /> 선택 항목만 PDF로 추출
+                              </button>
+                            ) : (
+                              <button onClick={() => executeGeneration(files.filter(f => selectedPages.has(f.id)), 'images')} className="flex items-center gap-1.5 text-sm bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-xl transition-all font-bold shadow-md hover:shadow-lg active:scale-95">
+                                <Archive size={16} /> 선택 항목 다운로드
+                              </button>
+                            )}
+                            
+                            <button onClick={removeSelected} className="flex items-center gap-1.5 text-sm bg-rose-50 hover:bg-rose-100 text-rose-600 px-4 py-2 rounded-xl transition-all font-bold active:scale-95">
+                              <Trash2 size={16} /> 선택 삭제
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <div className="flex bg-slate-100 p-1 rounded-xl">
+                              <button onClick={sortFilesAlphabetically} className="flex items-center gap-1.5 text-xs text-slate-600 hover:text-slate-900 hover:bg-white px-3 py-1.5 rounded-lg transition-all font-bold" title="이름순 정렬">
+                                <ArrowDownAZ size={14} /> 정렬
+                              </button>
+                              <button onClick={reverseFiles} className="flex items-center gap-1.5 text-xs text-slate-600 hover:text-slate-900 hover:bg-white px-3 py-1.5 rounded-lg transition-all font-bold" title="순서 뒤집기">
+                                <ArrowUpDown size={14} /> 역순
+                              </button>
+                            </div>
+                            <div className="w-px h-6 bg-slate-200 mx-1 hidden sm:block"></div>
+                            {appMode === 'pdf' && (
+                               <button onClick={addBlankPage} className="flex items-center gap-1.5 text-sm bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-xl transition-all font-bold active:scale-95"><FilePlus size={16} /> 빈 종이</button>
+                            )}
+                            <button onClick={clearAllFiles} className="flex items-center gap-1 text-sm text-slate-400 hover:text-rose-500 px-2 py-2 rounded-xl transition-colors font-bold">전체 초기화</button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Grid */}
+                    <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-5">
+                      {files.map((file, index) => {
+                        const isSelected = selectedPages.has(file.id);
+                        const hasCrop = file.cropData && (file.cropData.top > 0 || file.cropData.bottom > 0 || file.cropData.left > 0 || file.cropData.right > 0);
+                        const borderColorClass = appMode === 'pdf' ? 'border-indigo-500 ring-indigo-500/20' : 'border-purple-500 ring-purple-500/20';
+                        const checkboxBgClass = appMode === 'pdf' ? 'bg-indigo-500' : 'bg-purple-500';
+                        const iconHoverClass = appMode === 'pdf' ? 'hover:text-indigo-400' : 'hover:text-purple-400';
+                        const textHoverClass = appMode === 'pdf' ? 'hover:text-indigo-600 hover:bg-indigo-50' : 'hover:text-purple-600 hover:bg-purple-50';
+
+                        let estW = file.originalWidth || 0;
+                        let estH = file.originalHeight || 0;
+                        if (enableBatchOptimize && estW > 0 && estH > 0) {
+                           if (batchResizeMode === 'ratio') {
+                              estW = estW * (batchScaleRatio / 100);
+                              estH = estH * (batchScaleRatio / 100);
+                           } else if (batchResizeMode === 'width' && batchWidth > 0) {
+                              estH = estH * (batchWidth / estW);
+                              estW = batchWidth;
+                           } else if (batchResizeMode === 'height' && batchHeight > 0) {
+                              estW = estW * (batchHeight / estH);
+                              estH = batchHeight;
+                           } else if (batchResizeMode === 'custom') {
+                              if (batchWidth > 0) estW = batchWidth;
+                              if (batchHeight > 0) estH = batchHeight;
+                           }
+                        }
+
+                        let finalEstSize = file.baseSize;
+                        if (enableBatchOptimize && batchEstimatedSizes[file.id]) {
+                            finalEstSize = batchEstimatedSizes[file.id];
+                        }
+
+                        return (
+                          <div 
+                            key={file.id} 
+                            draggable onDragStart={(e) => handleItemDragStart(e, index)} onDragOver={(e) => e.preventDefault()} onDrop={(e) => handleItemDrop(e, index)}
+                            onClick={(e) => handlePageSelect(e, file.id, index)}
+                            className={`group relative flex flex-col bg-slate-50 border-2 rounded-2xl overflow-hidden transition-all cursor-grab active:cursor-grabbing
+                              ${isSelected ? `${borderColorClass} ring-4 shadow-md transform -translate-y-1` : file.type === 'blank-page' ? 'border-dashed border-slate-300 hover:border-slate-400' : `border-slate-200/80 hover:shadow-md ${appMode === 'pdf' ? 'hover:border-indigo-300' : 'hover:border-purple-300'}`}`}
+                          >
+                            <div className={`absolute top-2.5 left-2.5 z-10 p-0.5 rounded-md shadow-sm transition-all ${isSelected ? `${checkboxBgClass} text-white scale-110` : `bg-white/90 text-slate-300 opacity-0 group-hover:opacity-100 backdrop-blur-md ${iconHoverClass}`}`}>
+                              <CheckSquare size={18} strokeWidth={2.5} />
+                            </div>
+
+                            <button onClick={(e) => { e.stopPropagation(); removeFile(file.id); }} className="absolute top-2.5 right-2.5 z-10 p-1.5 bg-white/90 text-slate-400 hover:text-white hover:bg-rose-500 rounded-full opacity-0 group-hover:opacity-100 transition-all shadow-sm backdrop-blur-md">
+                              <X size={14} strokeWidth={3} />
+                            </button>
+
+                            <div className="h-40 w-full flex items-center justify-center p-4 bg-white relative group/img overflow-hidden">
+                              {file.isEncrypted && (
+                                <div className="absolute bottom-2 left-2 bg-orange-100/90 text-orange-700 p-1.5 rounded-lg shadow-sm z-10 backdrop-blur-sm" title="보안 스캔 문서">
+                                  <Lock size={12} strokeWidth={2.5} />
+                                </div>
+                              )}
+                              <div 
+                                className={`flex items-center justify-center w-full h-full transition-transform duration-500 ${appMode === 'image' && grayscaleMode ? 'grayscale' : ''}`}
+                                style={{ transform: `rotate(${file.rotation}deg)` }}
+                              >
+                                {file.type === 'blank-page' ? (
+                                   <PlusSquare size={48} className="text-slate-200" strokeWidth={1} />
+                                ) : file.preview ? (
+                                  <div className="relative inline-block max-w-full max-h-full">
+                                    <img src={file.preview} alt={file.name} className="max-w-full max-h-full object-contain drop-shadow-md" />
+                                    {hasCrop && appMode === 'image' && (
+                                      <>
+                                        <div className="absolute top-0 left-0 right-0 bg-white/70 backdrop-blur-[1px]" style={{ height: `${file.cropData.top}%` }} />
+                                        <div className="absolute bottom-0 left-0 right-0 bg-white/70 backdrop-blur-[1px]" style={{ height: `${file.cropData.bottom}%` }} />
+                                        <div className="absolute top-0 bottom-0 left-0 bg-white/70 backdrop-blur-[1px]" style={{ width: `${file.cropData.left}%`, top: `${file.cropData.top}%`, bottom: `${file.cropData.bottom}%` }} />
+                                        <div className="absolute top-0 bottom-0 right-0 bg-white/70 backdrop-blur-[1px]" style={{ width: `${file.cropData.right}%`, top: `${file.cropData.top}%`, bottom: `${file.cropData.bottom}%` }} />
+                                        <div className={`absolute border ${appMode === 'pdf' ? 'border-indigo-500/50' : 'border-purple-500/50'}`} style={{ top: `${file.cropData.top}%`, bottom: `${file.cropData.bottom}%`, left: `${file.cropData.left}%`, right: `${file.cropData.right}%` }}></div>
+                                      </>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <FileText size={48} className={appMode === 'pdf' ? 'text-indigo-200' : 'text-purple-200'} />
+                                )}
+                              </div>
+                              
+                              <div 
+                                className="absolute inset-0 bg-slate-900/10 flex items-center justify-center opacity-0 group-hover/img:opacity-100 transition-all duration-300 cursor-zoom-in backdrop-blur-[2px]"
+                                onClick={(e) => { e.stopPropagation(); setPreviewItem(file); setZoom(1); }}
+                              >
+                                <div className={`bg-white/90 p-3 rounded-full shadow-xl hover:scale-110 hover:text-white transition-all transform translate-y-2 group-hover/img:translate-y-0 ${appMode === 'pdf' ? 'text-indigo-600 hover:bg-indigo-600' : 'text-purple-600 hover:bg-purple-600'}`}>
+                                  <Maximize2 size={20} strokeWidth={2.5} />
+                                </div>
+                              </div>
+
+                              {appMode === 'image' && file.originalWidth > 0 && (
+                                <div className="absolute bottom-2 left-2 z-10 flex flex-col gap-1 pointer-events-none">
+                                  <div className="bg-black/70 backdrop-blur-sm text-white text-[9px] font-black px-1.5 py-0.5 rounded shadow-sm flex items-center gap-1 w-max">
+                                    {Math.round(file.originalWidth)}x{Math.round(file.originalHeight)}
+                                    {enableBatchOptimize && (
+                                      <>
+                                        <span className="text-amber-400">➔</span> 
+                                        {Math.round(estW)}x{Math.round(estH)}
+                                      </>
+                                    )}
+                                  </div>
+                                  {finalEstSize > 0 && (
+                                    <div className="bg-purple-600/90 backdrop-blur-sm text-white text-[9px] font-black px-1.5 py-0.5 rounded shadow-sm w-max transition-all">
+                                      {enableBatchOptimize && !batchEstimatedSizes[file.id] ? (
+                                          <span className="animate-pulse">계산중...</span>
+                                      ) : (
+                                          <>{formatBytes(finalEstSize)}</>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+
+                            <div className="p-2 border-t border-slate-100 bg-white flex flex-col gap-2 z-20">
+                              <p className="text-[11px] font-bold text-slate-700 truncate w-full text-center px-1" title={file.name}>{file.name}</p>
+                              <div className={`grid ${appMode === 'image' ? 'grid-cols-5' : 'grid-cols-2'} gap-1 px-0.5`}>
+                                {appMode === 'pdf' ? (
+                                   <>
+                                     <button onClick={(e) => { e.stopPropagation(); rotateFile(file.id); }} className={`flex flex-col items-center justify-center py-1.5 text-slate-400 bg-slate-50 rounded-lg transition-colors ${textHoverClass}`} title="회전"><RotateCw size={14} strokeWidth={2.5} /></button>
+                                     <button onClick={(e) => { e.stopPropagation(); duplicateFile(file.id); }} className={`flex flex-col items-center justify-center py-1.5 text-slate-400 bg-slate-50 rounded-lg transition-colors ${textHoverClass}`} title="복제"><Copy size={14} strokeWidth={2.5} /></button>
+                                   </>
+                                ) : (
+                                   <>
+                                     <button onClick={(e) => { e.stopPropagation(); rotateFile(file.id); }} className={`flex flex-col items-center justify-center py-1.5 text-slate-400 bg-slate-50 rounded-lg transition-colors ${textHoverClass}`} title="회전"><RotateCw size={14} strokeWidth={2.5} /></button>
+                                     <button onClick={(e) => { e.stopPropagation(); duplicateFile(file.id); }} className={`flex flex-col items-center justify-center py-1.5 text-slate-400 bg-slate-50 rounded-lg transition-colors ${textHoverClass}`} title="복제"><Copy size={14} strokeWidth={2.5} /></button>
+                                     <button onClick={(e) => openCropModal(e, file)} className={`flex flex-col items-center justify-center py-1.5 rounded-lg transition-colors ${hasCrop ? `text-white bg-purple-500 hover:bg-purple-600` : `text-slate-400 bg-slate-50 ${textHoverClass}`}`} title="여백 자르기"><Crop size={14} strokeWidth={2.5} /></button>
+                                     <button onClick={(e) => openImageEditor(e, file)} className="flex flex-col items-center justify-center py-1.5 text-slate-400 hover:text-pink-600 bg-slate-50 hover:bg-pink-50 rounded-lg transition-colors" title="고급 이미지 에디터 (그리기, 모자이크 등)"><Palette size={14} strokeWidth={2.5} /></button>
+                                     <button onClick={(e) => downloadSingleImage(e, file)} className="flex flex-col items-center justify-center py-1.5 text-slate-400 hover:text-emerald-600 bg-slate-50 hover:bg-emerald-50 rounded-lg transition-colors" title="이 페이지만 단일 이미지로 즉시 저장"><ImageIcon size={14} strokeWidth={2.5} /></button>
+                                   </>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Sidebar Settings */}
+              <div className="lg:col-span-4 xl:col-span-3 space-y-5">
+                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 sticky top-6">
+                  <h2 className="text-xl font-black mb-6 flex items-center gap-2 border-b border-slate-100 pb-4">
+                    <Settings className={appMode === 'pdf' ? 'text-indigo-600' : 'text-purple-600'} /> 스튜디오 엔진
+                  </h2>
+
+                  <div className="space-y-8">
+                    {appMode === 'pdf' && (
+                      <div className="space-y-4">
+                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">문서(PDF) 전용 설정</p>
+                        <input type="text" value={metaTitle} onChange={(e)=>setMetaTitle(e.target.value)} placeholder="PDF 파일 제목" className="w-full px-4 py-3 bg-slate-50 border border-slate-100 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm font-bold" />
+                        <input type="text" value={watermark} onChange={(e)=>setWatermark(e.target.value)} placeholder="워터마크 텍스트" className="w-full px-4 py-3 bg-slate-50 border border-slate-100 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm font-bold" />
+                        <label className="flex items-center gap-3 p-3 border border-slate-100 rounded-2xl cursor-pointer hover:bg-slate-50">
+                          <input type="checkbox" checked={addPageNumbers} onChange={(e)=>setAddPageNumbers(e.target.checked)} className="w-5 h-5 text-indigo-600 rounded"/>
+                          <span className="text-sm font-bold text-slate-600">페이지 번호 삽입</span>
+                        </label>
+                        <label className="flex items-center gap-3 p-3 border border-slate-100 rounded-2xl cursor-pointer hover:bg-slate-50">
+                          <input type="checkbox" checked={forceA4} onChange={(e)=>setForceA4(e.target.checked)} className="w-5 h-5 text-indigo-600 rounded"/>
+                          <span className="text-sm font-bold text-slate-600">A4 규격 고정</span>
+                        </label>
+                      </div>
+                    )}
+
+                    {appMode === 'pdf' && <div className="h-px bg-slate-100"></div>}
+
+                    <div className="space-y-4">
+                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">이미지 및 일괄 처리</p>
+                      
+                      {/* 🚀 ZIP 및 접미사 제어 설정 옵션 */}
+                      <label className="flex items-center gap-3 p-3 border border-slate-100 rounded-2xl cursor-pointer hover:bg-slate-50">
+                        <input type="checkbox" checked={exportAsZip} onChange={(e)=>setExportAsZip(e.target.checked)} className="w-5 h-5 text-indigo-600 rounded"/>
+                        <span className="text-sm font-bold text-slate-600">ZIP 파일로 압축 (여러 장일 때)</span>
+                      </label>
+                      <label className="flex items-center gap-3 p-3 border border-slate-100 rounded-2xl cursor-pointer hover:bg-slate-50">
+                        <input type="checkbox" checked={addNumberPrefix} onChange={(e)=>setAddNumberPrefix(e.target.checked)} className="w-5 h-5 text-indigo-600 rounded"/>
+                        <span className="text-sm font-bold text-slate-600">파일명에 순서(001_) 추가</span>
+                      </label>
+
+                      <label className="flex items-center gap-3 p-3 border border-slate-100 rounded-2xl cursor-pointer hover:bg-slate-50">
+                        <input type="checkbox" checked={grayscaleMode} onChange={(e)=>setGrayscaleMode(e.target.checked)} className="w-5 h-5 text-slate-800 rounded"/>
+                        <span className="text-sm font-bold text-slate-600">흑백(Grayscale) 변환</span>
+                      </label>
+
+                      <label className={`flex items-start gap-3 p-4 border-2 rounded-2xl cursor-pointer transition-all ${enableBatchOptimize ? 'border-amber-500 bg-amber-50' : 'border-slate-100'}`}>
+                        <input type="checkbox" checked={enableBatchOptimize} onChange={(e)=>setEnableBatchOptimize(e.target.checked)} className="mt-1 w-5 h-5 text-amber-600 rounded"/>
+                        <div className="flex flex-col flex-1 w-full">
+                           <span className="text-sm font-black text-slate-800">일괄 이미지 변환</span>
+                           
+                           {enableBatchOptimize && (
+                             <div className="mt-4 space-y-4 w-full" onClick={e=>e.stopPropagation()}>
+                               <div>
+                                 <PerformanceSlider 
+                                    label="압축 품질:" 
+                                    min="10" max="100" 
+                                    value={batchQuality} 
+                                    onCommit={setBatchQuality} 
+                                    textClass="text-amber-600"
+                                    accentClass="accent-amber-500"
+                                 />
+                               </div>
+
+                               <div className="pt-2 border-t border-amber-200/50">
+                                 <div className="flex justify-between text-[10px] font-black mb-2 uppercase text-slate-500">변환 기준</div>
+                                 <div className="grid grid-cols-2 gap-2 mb-3">
+                                   {[
+                                     { val: 'ratio', label: '비율 축소' },
+                                     { val: 'width', label: '가로 맞춤' },
+                                     { val: 'height', label: '세로 맞춤' },
+                                     { val: 'custom', label: '사용자 지정' }
+                                   ].map(m => (
+                                     <button key={m.val} onClick={() => setBatchResizeMode(m.val)} className={`py-2 text-[11px] font-black rounded-lg border transition-all ${batchResizeMode === m.val ? 'bg-amber-500 border-amber-600 text-white shadow-md' : 'bg-white border-slate-200 text-slate-500 hover:border-amber-300 hover:bg-amber-50'}`}>
+                                        {m.label}
+                                     </button>
+                                   ))}
+                                 </div>
+
+                                 {batchResizeMode === 'ratio' && (
+                                    <div>
+                                      <PerformanceSlider 
+                                          label="축소 비율:" 
+                                          min="10" max="100" 
+                                          value={batchScaleRatio} 
+                                          onCommit={setBatchScaleRatio} 
+                                          textClass="text-amber-600"
+                                          accentClass="accent-amber-500"
+                                      />
+                                    </div>
+                                 )}
+
+                                 {batchResizeMode === 'width' && (
+                                    <div>
+                                      <label className="text-[10px] font-black text-slate-500 mb-1 block">고정 가로 폭 (PX)</label>
+                                      <input type="number" value={batchWidth} onChange={e=>setBatchWidth(Number(e.target.value))} placeholder="예: 1920" className="w-full p-2.5 bg-white border border-slate-200 rounded-lg text-xs font-bold outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
+                                    </div>
+                                 )}
+
+                                 {batchResizeMode === 'height' && (
+                                    <div>
+                                      <label className="text-[10px] font-black text-slate-500 mb-1 block">고정 세로 높이 (PX)</label>
+                                      <input type="number" value={batchHeight} onChange={e=>setBatchHeight(Number(e.target.value))} placeholder="예: 1080" className="w-full p-2.5 bg-white border border-slate-200 rounded-lg text-xs font-bold outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500" />
+                                    </div>
+                                 )}
+
+                                 {batchResizeMode === 'custom' && (
+                                    <div className="grid grid-cols-2 gap-2">
+                                      <div>
+                                        <label className="text-[10px] font-black text-slate-500 mb-1 block">가로 (PX)</label>
+                                        <input type="number" value={batchWidth} onChange={e=>setBatchWidth(Number(e.target.value))} placeholder="1920" className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs font-bold outline-none focus:border-amber-500" />
+                                      </div>
+                                      <div>
+                                        <label className="text-[10px] font-black text-slate-500 mb-1 block">세로 (PX)</label>
+                                        <input type="number" value={batchHeight} onChange={e=>setBatchHeight(Number(e.target.value))} placeholder="1080" className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs font-bold outline-none focus:border-amber-500" />
+                                      </div>
+                                    </div>
+                                 )}
+                               </div>
+                             </div>
+                           )}
+                        </div>
+                      </label>
+                    </div>
+
+                    <div className="pt-4 space-y-3">
+                      {appMode === 'pdf' ? (
+                        <button 
+                          onClick={() => executeGeneration(files, 'pdf')}
+                          disabled={isProcessing || files.length === 0}
+                          className="w-full py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-black shadow-lg shadow-indigo-100 flex items-center justify-center gap-2 transition-all hover:-translate-y-1 active:translate-y-0 disabled:opacity-40"
+                        >
+                          {isProcessing ? <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"/> : <FileDown size={20}/>}
+                          PDF 파일로 병합 저장
+                        </button>
+                      ) : (
+                        <button 
+                          onClick={() => executeGeneration(files, 'images')}
+                          disabled={isProcessing || files.length === 0}
+                          className="w-full py-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl font-black shadow-lg shadow-emerald-100 flex items-center justify-center gap-2 transition-all hover:-translate-y-1 active:translate-y-0 disabled:opacity-40"
+                        >
+                          <Archive size={20}/> 전체 이미지 다운받기
+                        </button>
+                      )}
+                      {isProcessing && <p className={`text-center text-[10px] font-black animate-pulse uppercase tracking-tighter ${appMode === 'pdf' ? 'text-indigo-600' : 'text-purple-600'}`}>{processingMsg}</p>}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Advanced Image Editor Modal */}
+          {imageEditorItem && (
+            <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/95 backdrop-blur-xl">
+               <div className="bg-white w-11/12 max-w-[1400px] h-[90vh] rounded-[40px] overflow-hidden shadow-2xl flex flex-col border border-white/20">
+                  <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50 shrink-0">
+                     <div>
+                        <h3 className="text-2xl font-black text-slate-800 flex items-center gap-2 tracking-tighter uppercase"><Edit3 className="text-purple-600"/> Advanced Image Editor</h3>
+                        <p className="text-xs text-slate-400 font-bold mt-0.5">문서 위에 자유롭게 밑줄, 형광펜, 모자이크 처리를 해보세요.</p>
+                     </div>
+                     <button onClick={() => setImageEditorItem(null)} className="p-3 bg-white border border-slate-200 text-slate-400 hover:text-rose-500 rounded-full transition-all hover:rotate-90"><X size={24} strokeWidth={3}/></button>
+                  </div>
+
+                  <div className="flex flex-1 overflow-hidden relative">
+                     <div className="w-20 bg-slate-900 flex flex-col items-center py-6 gap-6 shrink-0 border-r border-white/10">
+                        <button onClick={()=>setEditorMode('select')} className={`p-4 rounded-2xl transition-all ${editorMode==='select'?'bg-purple-600 text-white shadow-lg':'text-slate-500 hover:text-white hover:bg-white/10'}`} title="선택 및 이동"><MousePointer2/></button>
+                        <button onClick={()=>setEditorMode('draw')} className={`p-4 rounded-2xl transition-all ${editorMode==='draw'?'bg-purple-600 text-white shadow-lg':'text-slate-500 hover:text-white hover:bg-white/10'}`} title="자유 그리기 (펜)"><PenTool/></button>
+                        <button onClick={()=>setEditorMode('highlight')} className={`p-4 rounded-2xl transition-all ${editorMode==='highlight'?'bg-purple-600 text-white shadow-lg':'text-slate-500 hover:text-white hover:bg-white/10'}`} title="반투명 형광펜"><Highlighter/></button>
+                        <div className="w-10 h-px bg-white/10"></div>
+                        <button onClick={addTextToCanvas} className="p-4 text-slate-500 hover:text-white hover:bg-white/10 rounded-2xl" title="텍스트 입력 (밑줄 기능 지원)"><TypeIcon/></button>
+                        <button onClick={addCensorBox} className="p-4 text-slate-500 hover:text-white hover:bg-white/10 rounded-2xl" title="블랙박스 가림막 (초상권 보호)"><SquareIcon fill="currentColor"/></button>
+                        <button onClick={deleteSelectedFabricObj} className="mt-auto p-4 text-rose-400 hover:bg-rose-500/20 rounded-2xl transition-all" title="선택한 객체 삭제"><Trash2/></button>
+                     </div>
+
+                     <div className="flex-1 bg-[#121212] p-10 flex justify-center items-center overflow-hidden" ref={editorContainerRef}>
+                     </div>
+
+                     <div className="w-80 bg-white border-l border-slate-100 flex flex-col shrink-0">
+                        <div className="p-6 flex-1 space-y-8 overflow-y-auto">
+                           <div className="space-y-4">
+                              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block border-b pb-2">Style & Format</label>
+                              
+                              <div className="flex gap-2 mb-4 bg-slate-50 p-1.5 rounded-xl border border-slate-200">
+                                 <button onClick={() => toggleTextFormat('bold')} className={`flex-1 flex justify-center p-2 rounded-lg transition-colors ${textFormat.bold ? 'bg-white text-slate-900 shadow font-black' : 'text-slate-400 hover:text-slate-700'}`} title="굵게"><Bold size={18}/></button>
+                                 <button onClick={() => toggleTextFormat('italic')} className={`flex-1 flex justify-center p-2 rounded-lg transition-colors ${textFormat.italic ? 'bg-white text-slate-900 shadow font-black' : 'text-slate-400 hover:text-slate-700'}`} title="기울임"><Italic size={18}/></button>
+                                 <button onClick={() => toggleTextFormat('underline')} className={`flex-1 flex justify-center p-2 rounded-lg transition-colors ${textFormat.underline ? 'bg-white text-slate-900 shadow font-black' : 'text-slate-400 hover:text-slate-700'}`} title="밑줄"><Underline size={18}/></button>
+                              </div>
+
+                              <div className="grid grid-cols-4 gap-2">
+                                 {['#ef4444','#3b82f6','#22c55e','#eab308','#a855f7','#000000','#ffffff','#64748b'].map(c => (
+                                   <button key={c} onClick={()=>setEditorColor(c)} className={`w-10 h-10 rounded-xl border-4 ${editorColor===c?'border-indigo-600 scale-110 shadow-lg':'border-slate-50'}`} style={{backgroundColor: c}}/>
+                                 ))}
+                              </div>
+
+                              {(editorMode === 'draw' || editorMode === 'highlight') && (
+                                 <div className="pt-2">
+                                    <PerformanceSlider 
+                                        label="Brush Size:" 
+                                        min="2" max="100" 
+                                        value={editorBrushSize} 
+                                        onCommit={setEditorBrushSize} 
+                                        textClass="text-indigo-600"
+                                        accentClass="accent-indigo-600"
+                                        suffix="px"
+                                    />
+                                 </div>
+                              )}
+                           </div>
+
+                           <div className="space-y-4 bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block border-b border-slate-200 pb-2 flex items-center justify-between">
+                                 <div className="flex items-center gap-1.5"><Sliders size={14}/> 이미지 보정 (필터)</div>
+                                 <div id="filter-spinner" className="hidden text-indigo-600 items-center gap-1 animate-pulse"><div className="w-3 h-3 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"/>적용 중..</div>
+                              </label>
+                              
+                              <div>
+                                 <div className="flex justify-between items-center text-[10px] font-black mb-2 uppercase text-slate-500">
+                                    <span className="flex items-center gap-1"><Sun size={12}/> 밝기</span>
+                                    <span id="val-brightness">0</span>
+                                 </div>
+                                 <input type="range" min="-100" max="100" defaultValue="0" id="slider-brightness" onInput={e=>handleFilterDrag('brightness', e.target.value)} className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600" />
+                              </div>
+                              
+                              <div>
+                                 <div className="flex justify-between items-center text-[10px] font-black mb-2 uppercase text-slate-500">
+                                    <span className="flex items-center gap-1"><Moon size={12}/> 대비</span>
+                                    <span id="val-contrast">0</span>
+                                 </div>
+                                 <input type="range" min="-100" max="100" defaultValue="0" id="slider-contrast" onInput={e=>handleFilterDrag('contrast', e.target.value)} className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600" />
+                              </div>
+
+                              <div>
+                                 <div className="flex justify-between items-center text-[10px] font-black mb-2 uppercase text-slate-500">
+                                    <span className="flex items-center gap-1"><Droplet size={12}/> 채도</span>
+                                    <span id="val-saturation">0</span>
+                                 </div>
+                                 <input type="range" min="-100" max="100" defaultValue="0" id="slider-saturation" onInput={e=>handleFilterDrag('saturation', e.target.value)} className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600" />
+                              </div>
+
+                              <div>
+                                 <div className="flex justify-between items-center text-[10px] font-black mb-2 uppercase text-slate-500">
+                                    <span className="flex items-center gap-1"><SunDim size={12}/> 밝은 영역</span>
+                                    <span id="val-highlights">0</span>
+                                 </div>
+                                 <input type="range" min="-100" max="100" defaultValue="0" id="slider-highlights" onInput={e=>handleFilterDrag('highlights', e.target.value)} className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600" />
+                              </div>
+
+                              <div>
+                                 <div className="flex justify-between items-center text-[10px] font-black mb-2 uppercase text-slate-500">
+                                    <span className="flex items-center gap-1"><Cloud size={12}/> 어두운 영역</span>
+                                    <span id="val-shadows">0</span>
+                                 </div>
+                                 <input type="range" min="-100" max="100" defaultValue="0" id="slider-shadows" onInput={e=>handleFilterDrag('shadows', e.target.value)} className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600" />
+                              </div>
+
+                              <div className="pt-2">
+                                 <button onClick={resetFilters} className="w-full py-2 text-[10px] font-black bg-white border border-slate-200 text-slate-500 rounded-lg hover:bg-slate-100 hover:text-slate-700 transition-colors">
+                                    필터 초기화
+                                 </button>
+                              </div>
+                           </div>
+
+                           <div className="space-y-4 bg-slate-50 p-4 rounded-2xl">
+                              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block border-b border-slate-200 pb-2">Output Target</label>
+                              
+                              <div className="bg-white p-3 rounded-xl shadow-sm border border-slate-100 flex items-center justify-between mb-2">
+                                <div className="flex items-center gap-2 text-indigo-600">
+                                   <HardDrive size={16}/>
+                                   <span className="text-[10px] font-black uppercase">실제 예상 용량</span>
+                                </div>
+                                <span className="text-sm font-black text-slate-800">
+                                  {editorRealSize ? formatBytes(editorRealSize) : <span className="animate-pulse text-slate-400">계산 중...</span>}
+                                </span>
+                              </div>
+
+                              <div className="pt-1">
+                                 <PerformanceSlider 
+                                    label="비율 축소" 
+                                    min="10" max="100" 
+                                    value={editorScaleRatio} 
+                                    onCommit={(ratio)=>{
+                                       setEditorScaleRatio(ratio);
+                                       setEditorDims({
+                                          w: originalDims.w * (ratio / 100),
+                                          h: originalDims.h * (ratio / 100)
+                                       });
+                                    }} 
+                                    textClass="text-purple-600"
+                                    accentClass="accent-purple-600"
+                                 />
+                              </div>
+                              <div className="grid grid-cols-2 gap-3 pt-2">
+                                 <div>
+                                    <label className="text-[9px] font-black text-slate-400 mb-1 block">가로 맞춤 (PX)</label>
+                                    <input type="number" value={Math.round(editorDims.w)} onChange={(e)=>{
+                                       const w = Number(e.target.value) || 1;
+                                       const ratio = (w / originalDims.w) * 100;
+                                       setEditorDims({w, h: w / (originalDims.w / originalDims.h)});
+                                       setEditorScaleRatio(Math.round(ratio));
+                                    }} className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-black shadow-sm outline-none focus:ring-2 focus:ring-indigo-500" />
+                                 </div>
+                                 <div>
+                                    <label className="text-[9px] font-black text-slate-400 mb-1 block">세로 맞춤 (PX)</label>
+                                    <input type="number" value={Math.round(editorDims.h)} onChange={(e)=>{
+                                       const h = Number(e.target.value) || 1;
+                                       const ratio = (h / originalDims.h) * 100;
+                                       setEditorDims({h, w: h * (originalDims.w / originalDims.h)});
+                                       setEditorScaleRatio(Math.round(ratio));
+                                    }} className="w-full p-3 bg-white border border-slate-200 rounded-xl text-xs font-black shadow-sm outline-none focus:ring-2 focus:ring-indigo-500" />
+                                 </div>
+                              </div>
+                              <div className="pt-2">
+                                 <PerformanceSlider 
+                                    label="압축 품질:" 
+                                    min="10" max="100" 
+                                    value={editorQuality} 
+                                    onCommit={setEditorQuality} 
+                                    textClass="text-indigo-600"
+                                    accentClass="accent-indigo-600"
+                                 />
+                              </div>
+                           </div>
+                        </div>
+                        
+                        <div className="p-6 bg-white border-t border-slate-100">
+                           <button onClick={saveImageEditor} className="w-full py-5 bg-indigo-600 text-white rounded-3xl font-black flex items-center justify-center gap-2 hover:bg-indigo-700 hover:shadow-xl shadow-indigo-100 hover:-translate-y-1 transition-all active:translate-y-0 uppercase tracking-tighter">
+                              <Save size={20}/> 변경사항 적용
+                           </button>
+                        </div>
+                     </div>
+                  </div>
+               </div>
+            </div>
+          )}
+
+          {/* Visual Crop Modal */}
+          {cropItem && appMode === 'image' && (
+            <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-900/95 backdrop-blur-md">
+                <div className="bg-white rounded-[40px] overflow-hidden shadow-2xl flex flex-col w-11/12 max-w-5xl max-h-[90vh]">
+                    <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                        <h3 className="text-2xl font-black text-slate-800 flex items-center gap-2 uppercase tracking-tighter"><Crop className="text-purple-600"/> Visual Crop Tool</h3>
+                        <button onClick={() => setCropItem(null)} className="p-2 text-slate-400 hover:text-rose-500 transition-colors"><X size={28} strokeWidth={3}/></button>
+                    </div>
+                    <div className="flex flex-col md:flex-row flex-1 overflow-hidden">
+                        <div className="flex-1 bg-slate-100/50 p-8 flex justify-center items-center relative">
+                            <div className="relative inline-block shadow-2xl bg-white ring-1 ring-slate-200">
+                                <img src={cropItem.preview} className="max-w-full max-h-[60vh] block" draggable={false} alt="c"/>
+                                <div className="absolute top-0 left-0 right-0 bg-slate-900/60 backdrop-blur-[2px]" style={{ height: `${cropMargins.top}%` }} />
+                                <div className="absolute bottom-0 left-0 right-0 bg-slate-900/60 backdrop-blur-[2px]" style={{ height: `${cropMargins.bottom}%` }} />
+                                <div className="absolute top-0 bottom-0 left-0 bg-slate-900/60 backdrop-blur-[2px]" style={{ width: `${cropMargins.left}%`, top: `${cropMargins.top}%`, bottom: `${cropMargins.bottom}%` }} />
+                                <div className="absolute top-0 bottom-0 right-0 bg-slate-900/60 backdrop-blur-[2px]" style={{ width: `${cropMargins.right}%`, top: `${cropMargins.top}%`, bottom: `${cropMargins.bottom}%` }} />
+                                <div className="absolute border-2 border-indigo-600 shadow-[0_0_0_1px_rgba(255,255,255,0.5)]" style={{ top: `${cropMargins.top}%`, bottom: `${cropMargins.bottom}%`, left: `${cropMargins.left}%`, right: `${cropMargins.right}%` }} />
+                            </div>
+                        </div>
+                        <div className="w-full md:w-80 bg-white p-8 border-l border-slate-100 flex flex-col">
+                            <div className="flex-1 space-y-6">
+                                {['top', 'bottom', 'left', 'right'].map(dir => (
+                                    <div key={dir} className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                                        <div className="flex justify-between items-center text-[10px] font-black text-slate-400 mb-3 uppercase tracking-widest">{dir} Margins</div>
+                                        <input type="range" min="0" max="45" value={cropMargins[dir]} onChange={(e) => setCropMargins(p => ({...p, [dir]: Number(e.target.value)}))} className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600" />
+                                    </div>
+                                ))}
+                            </div>
+                            <div className="pt-8 border-t border-slate-100 grid grid-cols-2 gap-3">
+                                <button onClick={() => setCropMargins({top:0,bottom:0,left:0,right:0})} className="py-4 text-sm font-black text-slate-500 bg-slate-100 rounded-2xl">Reset</button>
+                                <button onClick={saveCrop} className="py-4 text-sm font-black text-white bg-indigo-600 rounded-2xl shadow-lg shadow-indigo-100">Apply Crop</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+          )}
+
+          {/* Simple Viewer */}
+          {previewItem && (
+            <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/95 backdrop-blur-md transition-all" onClick={() => setPreviewItem(null)}>
+              <div className="absolute top-8 right-8 flex gap-3 z-[120]">
+                <div className="bg-black/80 rounded-2xl p-2 flex items-center gap-1 border border-white/20 shadow-2xl" onClick={e => e.stopPropagation()}>
+                  <button onClick={() => setZoom(z => Math.max(0.5, z - 0.5))} className="p-3 text-white/50 hover:text-white rounded-xl transition-colors"><ZoomOut size={24}/></button>
+                  <div className="flex items-center justify-center px-6 text-white font-black text-lg min-w-[6rem]">{Math.round(zoom * 100)}%</div>
+                  <button onClick={() => setZoom(z => Math.min(5, z + 0.5))} className="p-3 text-white/50 hover:text-white rounded-xl transition-colors"><ZoomIn size={24}/></button>
+                </div>
+                <button onClick={() => setPreviewItem(null)} className="p-4 bg-black border border-white/20 text-white rounded-2xl shadow-xl hover:rotate-90 hover:bg-rose-600 hover:border-rose-600 transition-all"><X size={28} strokeWidth={3}/></button>
+              </div>
+              <div className="w-full h-full overflow-auto flex items-center justify-center p-10" onClick={() => setPreviewItem(null)}>
+                <div className={`transition-transform duration-300 origin-center ${grayscaleMode ? 'grayscale' : ''}`} style={{ transform: `scale(${zoom}) rotate(${previewItem.rotation}deg)` }} onClick={e => e.stopPropagation()}>
+                  {previewItem.type === 'blank-page' ? (
+                    <div className="w-[595px] h-[842px] bg-white rounded-sm shadow-2xl flex items-center justify-center text-slate-200 font-black text-4xl uppercase">A4 Blank</div>
+                  ) : previewItem.preview && (
+                    <div className="relative inline-block">
+                      <img src={previewItem.preview} className="bg-white object-contain shadow-2xl rounded-sm max-h-[85vh] max-w-[90vw]" draggable={false} alt="p"/>
+                      {previewItem.cropData && (
+                        <>
+                          <div className="absolute top-0 left-0 right-0 bg-white/70 backdrop-blur-[2px]" style={{ height: `${previewItem.cropData.top}%` }} />
+                          <div className="absolute bottom-0 left-0 right-0 bg-white/70 backdrop-blur-[2px]" style={{ height: `${previewItem.cropData.bottom}%` }} />
+                          <div className="absolute top-0 bottom-0 left-0 bg-white/70 backdrop-blur-[2px]" style={{ width: `${previewItem.cropData.left}%`, top: `${previewItem.cropData.top}%`, bottom: `${previewItem.cropData.bottom}%` }} />
+                          <div className="absolute top-0 bottom-0 right-0 bg-white/70 backdrop-blur-[2px]" style={{ width: `${previewItem.cropData.right}%`, top: `${previewItem.cropData.top}%`, bottom: `${previewItem.cropData.bottom}%` }} />
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+        </div>
+      );
+    }
+    const root = createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
